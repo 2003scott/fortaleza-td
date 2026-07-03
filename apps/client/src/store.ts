@@ -38,6 +38,15 @@ function randomToken(): string {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+// lee un volumen guardado como entero 0..100; devuelve fracción 0..1.
+function readVol(key: string, fallback: number): number {
+  const raw = localStorage.getItem(key);
+  if (raw === null) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n / 100));
+}
+
 export const store = {
   name: localStorage.getItem('td_name') ?? '',
   // El token vive en sessionStorage: sobrevive a un F5 (reconexión) pero cada
@@ -45,6 +54,9 @@ export const store = {
   // pelearían por la misma identidad expulsándose mutuamente en bucle.
   token: sessionStorage.getItem('td_token') ?? '',
   muted: localStorage.getItem('td_muted') === '1',
+  // volúmenes 0..1 (persisten como enteros 0..100 en localStorage).
+  sfxVol: readVol('td_sfx_vol', 0.8),
+  musicVol: readVol('td_music_vol', 0.6),
   screen: 'home' as 'home' | 'lobby' | 'game',
   playerId: '',
   roomCode: '',

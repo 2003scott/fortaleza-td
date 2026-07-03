@@ -7,7 +7,7 @@ import { initInput } from './input.js';
 import { buildTowerBar, hidePanel, onTick, toast, addChat, refreshPanel, syncSpeedButton } from './hud.js';
 import { hideEnd, homeError, initHome, initLobby, renderLobby, showEnd, switchScreen } from './screens.js';
 import { beam, burst, clearParticles, floatText, line, ring } from './particles.js';
-import { sfx } from './audio.js';
+import { sfx, setSfxVolume, setMusicVolume, unlockAudio } from './audio.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -17,37 +17,41 @@ function processEvents(events: GameEvent[]): void {
   const gs = store.game;
   if (!gs) return;
   const myColor = gs.init.players.find((p) => p.id === store.playerId)?.color ?? '#fff';
+  // pan estéreo por posición: la x de la celda -> [-1 izq, +1 der] según el ancho.
+  const gw = gs.map.gridW;
+  const panOf = (x: number): number => Math.max(-1, Math.min(1, (x / gw) * 2 - 1));
 
   for (const ev of events) {
     switch (ev.e) {
       case 'shot':
         line(ev.x, ev.y, ev.tx, ev.ty, ev.color);
         towerFired(ev.x, ev.y);
-        sfx.snipe();
+        sfx.snipe(panOf(ev.x), ev.color);
         break;
       case 'chain':
         beam(ev.pts, ev.color);
         towerFired(ev.pts[0][0], ev.pts[0][1]);
-        sfx.zap();
+        sfx.zap(panOf(ev.pts[0][0]));
         break;
       case 'hit':
         if (ev.kind === 'splash') {
           ring(ev.x, ev.y, ev.r, '#ffab40');
           burst(ev.x, ev.y, '#ff7043', 10, 2.6);
           if (ev.r >= 1.2) addShake(2.5);
-          sfx.boom();
+          sfx.boom(panOf(ev.x));
         } else if (ev.kind === 'poison') {
           burst(ev.x, ev.y, '#9ccc65', 4, 1.2);
         } else if (ev.kind === 'frost') {
           burst(ev.x, ev.y, '#81d4fa', 4, 1.2);
         } else {
           burst(ev.x, ev.y, '#ffe082', 3, 1.4);
-          sfx.shot();
+          sfx.shot(panOf(ev.x));
         }
         break;
       case 'death': {
         const def = ENEMIES[ev.type];
         const big = def.boss || ev.elite;
+        const pan = panOf(ev.x);
         burst(ev.x, ev.y, def.color, def.boss ? 30 : ev.elite ? 18 : 9, big ? 3.5 : 2.2);
         ring(ev.x, ev.y, def.boss ? 1.6 : ev.elite ? 1.1 : def.radius * 2.2, def.color);
         if (def.boss) addShake(10);
@@ -57,8 +61,10 @@ function processEvents(events: GameEvent[]): void {
             gs.init.players.find((p) => p.id === ev.killer)?.color ?? '#ffd54f';
           floatText(ev.x, ev.y - 0.3, `+${ev.bounty}`, killerColor, ev.elite ? 15 : 13);
         }
-        sfx.death();
-        if (big) sfx.boom();
+        // firma de muerte según jerarquía: jefe (percusión) > élite (sting) > resto.
+        if (def.boss) sfx.bossDeath(pan);
+        else if (ev.elite) sfx.eliteDeath(pan);
+        else sfx.death(pan);
         break;
       }
       case 'miss':
@@ -79,15 +85,16 @@ function processEvents(events: GameEvent[]): void {
         break;
       case 'income':
         floatText(ev.x, ev.y - 0.4, `+🪙${ev.amount}`, '#ffd54f', 13);
+        // el ingreso de la mina es de oleada (sin foco espacial): pan neutro.
         sfx.coin();
         break;
       case 'place':
         burst(ev.x, ev.y, TOWERS[ev.towerType].color, 8, 1.8);
-        sfx.place();
+        sfx.place(panOf(ev.x));
         break;
       case 'upgrade':
         ring(ev.x, ev.y, 0.7, '#ffd54f');
-        sfx.upgrade();
+        sfx.upgrade(panOf(ev.x));
         break;
       case 'specialize':
         ring(ev.x, ev.y, 1.3, '#ffd54f');
@@ -95,11 +102,11 @@ function processEvents(events: GameEvent[]): void {
         burst(ev.x, ev.y, '#ffd54f', 18, 2.8);
         addShake(3);
         floatText(ev.x, ev.y - 0.6, `★ ${ev.name}`, '#ffd54f', 15);
-        sfx.specialize();
+        sfx.specialize(panOf(ev.x));
         break;
       case 'sell':
         floatText(ev.x, ev.y, `+🪙${ev.refund}`, '#ffd54f', 13);
-        sfx.sell();
+        sfx.sell(panOf(ev.x));
         break;
       case 'reject':
         if (ev.playerId === store.playerId) {
@@ -222,7 +229,8 @@ function wireNet(): void {
 
   net.on('map_ping', (msg) => {
     addPing(msg.x, msg.y, msg.color, msg.by);
-    sfx.ping();
+    const gw = store.game?.map.gridW;
+    sfx.ping(gw ? Math.max(-1, Math.min(1, (msg.x / gw) * 2 - 1)) : 0);
   });
 
   net.on('error', (msg) => {
@@ -287,6 +295,51 @@ function wireHudButtons(): void {
     store.muted = !store.muted;
     localStorage.setItem('td_muted', store.muted ? '1' : '0');
     syncMute();
+  });
+
+  // ---------- panel de ajustes ⚙ (sliders SFX + Música) ----------
+  const settingsBtn = $('btn-settings');
+  const panel = $('settings-panel');
+  const sfxRange = $<HTMLInputElement>('set-sfx');
+  const musicRange = $<HTMLInputElement>('set-music');
+  const sfxVal = $('set-sfx-val');
+  const musicVal = $('set-music-val');
+
+  const syncSliders = () => {
+    sfxRange.value = String(Math.round(store.sfxVol * 100));
+    musicRange.value = String(Math.round(store.musicVol * 100));
+    sfxVal.textContent = `${sfxRange.value}%`;
+    musicVal.textContent = `${musicRange.value}%`;
+  };
+  syncSliders();
+
+  const closePanel = () => {
+    panel.hidden = true;
+    settingsBtn.setAttribute('aria-expanded', 'false');
+  };
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    unlockAudio(); // abrir ajustes cuenta como interacción: desbloquea el audio
+    const open = panel.hidden;
+    panel.hidden = !open;
+    settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) syncSliders();
+  });
+  // clic fuera cierra el panel; clic dentro no.
+  panel.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => {
+    if (!panel.hidden) closePanel();
+  });
+
+  sfxRange.addEventListener('input', () => {
+    setSfxVolume(Number(sfxRange.value) / 100);
+    sfxVal.textContent = `${sfxRange.value}%`;
+  });
+  // al soltar, un chasquido de prueba para oír el volumen elegido.
+  sfxRange.addEventListener('change', () => sfx.place());
+  musicRange.addEventListener('input', () => {
+    setMusicVolume(Number(musicRange.value) / 100);
+    musicVal.textContent = `${musicRange.value}%`;
   });
 
   $('btn-back-lobby').addEventListener('click', () => {

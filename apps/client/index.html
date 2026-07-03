@@ -132,7 +132,23 @@
           <button id="btn-speed" class="btn small ghost" hidden>▶ x1</button>
           <button id="btn-pause" class="btn small ghost" hidden>⏸</button>
           <button id="btn-mute" class="btn small ghost">🔊</button>
+          <button id="btn-settings" class="btn small ghost" title="Ajustes de sonido" aria-haspopup="true" aria-expanded="false">⚙</button>
         </div>
+      </div>
+
+      <div id="settings-panel" hidden role="dialog" aria-label="Ajustes de sonido">
+        <h4>🎚️ Sonido</h4>
+        <label class="set-row">
+          <span>🔊 Efectos</span>
+          <input id="set-sfx" type="range" min="0" max="100" step="1" />
+          <span id="set-sfx-val" class="set-val">80%</span>
+        </label>
+        <label class="set-row">
+          <span>🎵 Música</span>
+          <input id="set-music" type="range" min="0" max="100" step="1" />
+          <span id="set-music-val" class="set-val">60%</span>
+        </label>
+        <p class="hint set-hint">La música llega en una próxima actualización.</p>
       </div>
 
       <div id="hud-players"></div>
