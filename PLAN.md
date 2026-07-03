@@ -2,7 +2,28 @@
 
 Roadmap de 7 features en 5 fases. **Ejecutor por defecto: Opus 4.8.**
 Las tareas marcadas 🧠 **Fable-5** son las de mayor dificultad arquitectónica o de diseño
-y deben ejecutarse con ese modelo.
+y deben ejecutarse con ese modelo (cambiar el modelo antes de lanzarlas).
+
+## Estado (actualizado 2026-07-03)
+
+**Fase 1 — Victorias rápidas ✅ COMPLETA**
+- ✅ F1.1 Mapas grandes (El Concilio 32×20 + La Torre vertical) + minimapa — `49e4e00`
+- ✅ F1.2 Estandarte (torre de aura, no apila) — `798deb5`
+- ✅ F1.3 Sonido v2 (ADSR, pan estéreo, sliders) — `256b412`
+- ✅ F1.4 Espectador que guía (mirar + chat 👁 + sugerir torres + promoción) — `0ec0936`
+
+**Fase 2 — Motor y modos ✅ COMPLETA**
+- ✅ F2.1 Repeticiones (seed+comandos, motor determinista, seek; identidad probada) — `b39cd09`
+- ✅ F2.2 Modo Horda (bucle + derrota por saturación + cansancio anti-esponja) — `b5ba3b9`
+
+**Pendiente:** (🧠 = ejecutar con Fable-5)
+- ⏳ F4.1 · Opus · Monstruos + sistema de oleadas Green TD (inmunidad/fuga escalonada/oleada bendecida) — *recomendado siguiente*
+- ⏳ F4.2 · Opus · Torres nuevas + Rango II de specs (procs con identidad)
+- ⏳ F4.3 · 🧠 Fable-5 · Fusión de torres (6 recetas)
+- ⏳ F3.1 · 🧠 Fable-5 · Música procedural adaptativa — *mejor al final (sabor, no bloquea)*
+- ⏳ F5.1 · 🧠 Fable-5 · Balance global + revisión adversarial + release en Cloudflare
+
+`BALANCE_VERSION` actual: **3** (subió con élites→2, horda→3). Los replays guardan su versión.
 
 **Reglas de ejecución para el orquestador (aplican a TODAS las tareas):**
 
@@ -49,9 +70,9 @@ Mecánicas verificadas en el JASS/binario del Green TD real, mapeadas a su tarea
 
 ---
 
-## Fase 1 — Victorias rápidas (todas Opus 4.8, ejecutar en este orden)
+## Fase 1 — Victorias rápidas ✅ COMPLETA
 
-### F1.1 · Mapas más grandes + minimapa — Opus 4.8 · riesgo bajo-medio
+### ✅ F1.1 · Mapas más grandes + minimapa — HECHO `49e4e00`
 
 - 2 mapas nuevos en `packages/shared/src/balance/maps.ts`:
   - **El Concilio** 32×20, estilo **Green TD**: 4-6 entradas repartidas por los bordes,
@@ -70,7 +91,7 @@ Mecánicas verificadas en el JASS/binario del Green TD real, mapeadas a su tarea
   bien (las genera `drawMiniMap` solo); en móvil, navegar El Concilio con zoom +
   minimapa es cómodo (tap en el minimapa lleva la cámara ahí).
 
-### F1.2 · Estandarte: auras de fuerza y velocidad, mejorables — Opus 4.8 · riesgo medio
+### ✅ F1.2 · Estandarte: auras de fuerza y velocidad, mejorables — HECHO `798deb5`
 
 La novena torre (hotkey 9), estilo Green TD: no ataca, buffea torres en radio.
 
@@ -89,7 +110,7 @@ La novena torre (hotkey 9), estilo Green TD: no ataca, buffea torres en radio.
 - simtest: bot construye estandarte junto a torres y el daño total sube vs. sin él;
   assert de no-apilamiento (2 estandartes ≠ 2× buff).
 
-### F1.3 · Sonido v2 (SFX) — Opus 4.8 · riesgo medio
+### ✅ F1.3 · Sonido v2 (SFX) — HECHO `256b412`
 
 `apps/client/src/audio.ts` es 100% procedural (WebAudio, sin archivos) — mantener eso.
 
@@ -104,7 +125,7 @@ La novena torre (hotkey 9), estilo Green TD: no ataca, buffea torres en radio.
 - Aceptación: sin errores de consola, sin clipping (limiter en el master), audible la
   diferencia posicional izquierda/derecha en el preview.
 
-### F1.4 · Modo espectador que puede GUIAR — Opus 4.8 · riesgo medio
+### ✅ F1.4 · Modo espectador que puede GUIAR — HECHO `0ec0936`
 
 Hoy, con la partida en curso, un jugador nuevo recibe «La partida ya comenzó». Nuevo
 comportamiento: entra como **espectador** — ve todo y puede guiar, pero no juega.
@@ -130,9 +151,9 @@ comportamiento: entra como **espectador** — ve todo y puede guiar, pero no jue
 
 ---
 
-## Fase 2 — Motor y modos
+## Fase 2 — Motor y modos ✅ COMPLETA
 
-### F2.1 · 🧠 Repeticiones — **FABLE-5** · riesgo ALTO (la tarea más difícil del plan)
+### ✅ F2.1 · Repeticiones — HECHO `b39cd09` (identidad de estado final probada en simtest+wstest)
 
 La sim determinista hace que un replay = `{seed + comandos}` (~2 KB). Nadie más puede
 hacerlo tan barato; hay que hacerlo bien.
@@ -157,7 +178,7 @@ hacerlo tan barato; hay que hacerlo bien.
   final (`tick/wave/lives/oro/rng`) con el de la partida original — deben ser
   **idénticos**. Añadir esto como assert nuevo del wstest.
 
-### F2.2 · Modo Horda — Opus 4.8 · riesgo medio
+### ✅ F2.2 · Modo Horda — HECHO `b5ba3b9`
 
 El modo Green TD: los enemigos no escapan, dan vueltas; pierdes por saturación.
 
@@ -181,7 +202,7 @@ El modo Green TD: los enemigos no escapan, dan vueltas; pierdes por saturación.
 
 ## Fase 3 — Sonido pro
 
-### F3.1 · 🧠 Música procedural adaptativa — **FABLE-5** · riesgo alto (calidad subjetiva)
+### ⏳ F3.1 · 🧠 Música procedural adaptativa — **FABLE-5** · riesgo alto (calidad subjetiva)
 
 Que suene BIEN es la parte difícil; por eso va a Fable-5.
 
@@ -296,14 +317,18 @@ Element TD style, pero con recetas CURADAS (no combinatoria):
 
 ---
 
-## Resumen de asignación de modelos
+## Resumen de estado y modelos
 
-| Tarea | Modelo | Por qué |
-|---|---|---|
-| F1.1 Mapas · F1.2 Estandarte · F1.3 SFX · F1.4 Espectador | Opus 4.8 | patrón conocido, infraestructura ya existe |
-| F2.1 Repeticiones | 🧠 **Fable-5** | arquitectura nueva (sim en cliente, seek, versionado) |
-| F2.2 Horda | Opus 4.8 | cambio de sim acotado + balance con bots |
-| F3.1 Música procedural | 🧠 **Fable-5** | calidad subjetiva difícil, audio adaptativo |
-| F4.1 Monstruos · F4.2 Torres/Rango II | Opus 4.8 | contenido sobre sistemas existentes |
-| F4.3 Fusión | 🧠 **Fable-5** | diseño mecánico + riesgo de balance alto |
-| F5.1 Balance global + revisión + release | 🧠 **Fable-5** | juicio fino transversal |
+| Tarea | Modelo | Estado | Commit |
+|---|---|---|---|
+| F1.1 Mapas + minimapa | Opus 4.8 | ✅ hecho | `49e4e00` |
+| F1.2 Estandarte | Opus 4.8 | ✅ hecho | `798deb5` |
+| F1.3 Sonido v2 | Opus 4.8 | ✅ hecho | `256b412` |
+| F1.4 Espectador que guía | Opus 4.8 | ✅ hecho | `0ec0936` |
+| F2.1 Repeticiones | 🧠 Fable-5 | ✅ hecho | `b39cd09` |
+| F2.2 Modo Horda | Opus 4.8 | ✅ hecho | `b5ba3b9` |
+| F4.1 Monstruos + oleadas Green TD | Opus 4.8 | ⏳ pendiente (recomendado siguiente) | — |
+| F4.2 Torres + Rango II | Opus 4.8 | ⏳ pendiente | — |
+| F4.3 Fusión de torres | 🧠 **Fable-5** | ⏳ pendiente | — |
+| F3.1 Música procedural | 🧠 **Fable-5** | ⏳ pendiente (mejor al final) | — |
+| F5.1 Balance global + revisión + release | 🧠 **Fable-5** | ⏳ pendiente (cierre) | — |
