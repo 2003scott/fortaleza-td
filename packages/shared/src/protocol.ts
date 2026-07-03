@@ -4,6 +4,7 @@ import type {
   GameEvent,
   GameMode,
   GameState,
+  ReplayData,
   TargetMode,
   TowerTypeId,
   WaveComp,
@@ -207,7 +208,7 @@ export type ServerMsg =
   | { type: 'lobby_state'; players: LobbyPlayer[]; settings: RoomSettings; inGame: boolean }
   | { type: 'game_started'; init: GameInit }
   | { type: 'tick'; t: number; snap: Snap; events: GameEvent[] }
-  | { type: 'game_over'; stats: EndStats }
+  | { type: 'game_over'; stats: EndStats; replay?: ReplayData }
   | { type: 'chat'; from: string; color: string; text: string }
   | { type: 'paused'; by: string }
   | { type: 'resumed' }

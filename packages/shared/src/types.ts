@@ -260,6 +260,41 @@ export interface PlayerCommand {
   cmd: Command;
 }
 
+// ---------- Repeticiones (replays) ----------
+//
+// Un replay es {semilla + roster inicial + línea de tiempo de entradas}. La sim
+// determinista lo reproduce EXACTO. Cada entrada lleva el TICK DE SIM `t` en el
+// que ocurre (el `game.tick` ANTES del stepGame que la aplica). Es CRÍTICO grabar
+// todo lo que afecte a `connectedCount` (join/conn), porque el escalado de HP y el
+// presupuesto de oleada dependen del número de jugadores CONECTADOS.
+
+export interface ReplayPlayer {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export type ReplayEntry =
+  // un comando aplicado por un jugador en el tick `t`
+  | { t: number; kind: 'cmd'; playerId: string; cmd: Command }
+  // un jugador entra a mitad de partida en el tick `t` (con su oro exacto de midJoin)
+  | { t: number; kind: 'join'; player: ReplayPlayer; gold: number }
+  // cambio de conexión de un jugador en el tick `t` (afecta a connectedCount)
+  | { t: number; kind: 'conn'; playerId: string; connected: boolean };
+
+export interface ReplayData {
+  v: number; // BALANCE_VERSION con el que se grabó (guard de versión al reproducir)
+  seed: number; // semilla elegida en startGame
+  mapId: string;
+  mode: GameMode;
+  difficulty: Difficulty;
+  players: ReplayPlayer[]; // roster inicial (los que estaban al empezar)
+  log: ReplayEntry[]; // línea de tiempo de entradas, ordenada por tick
+  finalTick: number; // tick en el que la partida terminó (para el seek y el assert)
+  victory: boolean;
+  wave: number; // oleada alcanzada
+}
+
 // ---------- Eventos (sim -> clientes, efímeros por tick) ----------
 
 export type GameEvent =

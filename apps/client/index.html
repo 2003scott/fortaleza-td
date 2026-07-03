@@ -64,6 +64,13 @@
           <h3>🏆 Récords (modo infinito)</h3>
           <ol id="home-scores-list"></ol>
         </div>
+
+        <div id="home-replays" class="replays" hidden>
+          <h3>🎬 Repeticiones</h3>
+          <ul id="home-replays-list" class="replay-list"></ul>
+        </div>
+        <button id="btn-load-replay" class="btn ghost small">📂 Cargar repetición (.json)</button>
+        <input id="replay-file" type="file" accept="application/json,.json" hidden />
       </div>
     </section>
 
@@ -180,6 +187,18 @@
 
       <div id="toasts"></div>
 
+      <!-- barra del reproductor de repeticiones (visible solo en modo replay) -->
+      <div id="replay-bar" hidden>
+        <div id="replay-warn" hidden>⚠️ Repetición de una versión anterior — puede no coincidir.</div>
+        <div class="replay-controls">
+          <button id="replay-play" class="btn small primary" title="Reproducir / Pausar">▶</button>
+          <button id="replay-speed" class="btn small ghost" title="Velocidad">x1</button>
+          <input id="replay-seek" type="range" min="0" max="100" step="1" value="0" />
+          <span id="replay-time" class="replay-time">0:00 / 0:00</span>
+          <button id="replay-exit" class="btn small ghost" title="Salir de la repetición">✕</button>
+        </div>
+      </div>
+
       <div id="overlay-pause" class="overlay" hidden>
         <div class="overlay-card panel">
           <h2>⏸ Pausa</h2>
@@ -194,7 +213,10 @@
           <p id="end-sub"></p>
           <div id="end-podium"></div>
           <div id="end-stats"></div>
-          <button id="btn-back-lobby" class="btn primary big">Volver al lobby</button>
+          <div class="end-actions">
+            <button id="btn-watch-replay" class="btn ghost big" hidden>🎬 Ver repetición</button>
+            <button id="btn-back-lobby" class="btn primary big">Volver al lobby</button>
+          </div>
         </div>
       </div>
     </section>

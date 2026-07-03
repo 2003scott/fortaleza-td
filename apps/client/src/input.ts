@@ -42,7 +42,7 @@ function worldFromPoint(canvas: HTMLCanvasElement, clientX: number, clientY: num
 // Si `towerType` viene dado, es una sugerencia de torre (map_ping con towerType).
 function sendPing(canvas: HTMLCanvasElement, clientX: number, clientY: number, towerType?: TowerTypeId): boolean {
   const gs = store.game;
-  if (!gs) return false;
+  if (!gs || store.replay) return false; // sin pings durante una repetición
   const w = worldFromPoint(canvas, clientX, clientY);
   if (w.x < -0.5 || w.y < -0.5 || w.x > gs.map.gridW + 0.5 || w.y > gs.map.gridH + 0.5) return false;
   net.send({ type: 'map_ping', x: w.x, y: w.y, ...(towerType ? { towerType } : {}) });
@@ -90,6 +90,8 @@ function sendPlace(cx: number, cy: number, keepPlacing: boolean): void {
 function tapSelect(canvas: HTMLCanvasElement, clientX: number, clientY: number, shiftKey: boolean, mouseLike: boolean): void {
   const gs = store.game;
   if (!gs || !gs.latest || gs.over) return;
+  // en modo repetición no hay input de juego (ni colocar/pinear/sugerir): solo mirar
+  if (store.replay) return;
 
   // modo sugerencia (torre armada desde la barra): el toque manda una sugerencia
   // de torre (map_ping + towerType) en vez de colocar. Tiene prioridad sobre el
@@ -350,6 +352,7 @@ export function initInput(canvas: HTMLCanvasElement): void {
 
   window.addEventListener('keydown', (e) => {
     if (store.screen !== 'game' || !store.game) return;
+    if (store.replay) return; // en repetición, el teclado de juego está desactivado
     const active = document.activeElement;
     if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
 

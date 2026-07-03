@@ -10,8 +10,10 @@ import {
   pathCells,
   pathLength,
   placementError,
+  replayTo,
   stepGame,
   towerLevel,
+  BALANCE_VERSION,
   MAPS,
   TICK_RATE,
   TOWERS,
@@ -20,6 +22,8 @@ import {
   type GameEvent,
   type GameState,
   type PlayerCommand,
+  type ReplayData,
+  type ReplayEntry,
   type TowerState,
   type TowerTypeId,
 } from '@td/shared';
@@ -351,6 +355,121 @@ console.log('— Estandarte: refuerza el daño de las torres cercanas (sin apila
   assert(base > 0, `el arquero dispara daño base (${base})`);
   assert(withBanner > base, `el estandarte sube el daño del arquero (${base} → ${withBanner})`);
   assert(withTwo === withBanner, `dos estandartes no apilan: mismo multiplicador que uno (${withBanner} == ${withTwo})`);
+}
+
+console.log('— Repetición (replay): reconstruye el estado final EXACTO —');
+{
+  // Juega una partida con bots GRABANDO el log de comandos igual que el servidor
+  // (cada comando con el tick de sim ANTES del stepGame que lo aplica), e inyecta
+  // una desconexión + reconexión de Beto a mitad de partida para ejercitar los
+  // eventos `conn` (que cambian connectedCount → escalado de HP y presupuesto de
+  // oleada). Luego reproduce con el motor puro y compara el estado final: idéntico.
+  const mapId = MAP_ID;
+  const seed = 424242;
+  const map = getMap(mapId);
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  const players = [
+    { id: 'p1', name: 'Ana', color: '#4fc3f7' },
+    { id: 'p2', name: 'Beto', color: '#f06292' },
+  ];
+  const state = createGame(mapId, 'classic', 'normal', seed, players);
+  const candidates = buildCellCandidates(mapId);
+  const counters = new Map<string, number>();
+  const log: ReplayEntry[] = [];
+
+  // marca de desconexión/reconexión de Beto (elegidas para caer en plena partida)
+  const DISCONNECT_TICK = TICK_RATE * 30;
+  const RECONNECT_TICK = TICK_RATE * 55;
+  let betoConnected = true;
+
+  const maxTicks = TICK_RATE * 60 * 12;
+  for (let i = 0; i < maxTicks && !state.over; i++) {
+    // cambios de conexión (como markConnected en el servidor): flip + log al tick
+    if (betoConnected && state.tick === DISCONNECT_TICK) {
+      const gp = state.players.find((p) => p.id === 'p2')!;
+      gp.connected = false;
+      betoConnected = false;
+      log.push({ t: state.tick, kind: 'conn', playerId: 'p2', connected: false });
+    } else if (!betoConnected && state.tick === RECONNECT_TICK) {
+      const gp = state.players.find((p) => p.id === 'p2')!;
+      gp.connected = true;
+      betoConnected = true;
+      log.push({ t: state.tick, kind: 'conn', playerId: 'p2', connected: true });
+    }
+
+    // solo el jugador conectado da órdenes mientras Beto está caído
+    const cmds = botCommands(state, candidates, counters).filter(
+      (c) => betoConnected || c.playerId !== 'p2',
+    );
+    const cmdTick = state.tick;
+    for (const c of cmds) log.push({ t: cmdTick, kind: 'cmd', playerId: c.playerId, cmd: c.cmd });
+    stepGame(state, simCtx, cmds);
+  }
+
+  const replay: ReplayData = {
+    v: BALANCE_VERSION,
+    seed,
+    mapId,
+    mode: 'classic',
+    difficulty: 'normal',
+    players,
+    log,
+    finalTick: state.tick,
+    victory: state.over?.victory ?? false,
+    wave: state.wave,
+  };
+
+  // reconstrucción con el motor puro (createGame + stepGame + entradas grabadas)
+  const rebuilt = replayTo(replay, replay.finalTick);
+
+  const realGold = state.players.map((p) => Math.round(p.gold));
+  const rebuiltGold = rebuilt.players.map((p) => Math.round(p.gold));
+
+  assert(log.some((e) => e.kind === 'conn' && e.connected === false), 'el log grabó la desconexión de Beto (conn=false)');
+  assert(log.some((e) => e.kind === 'conn' && e.connected === true), 'el log grabó la reconexión de Beto (conn=true)');
+  assert(rebuilt.tick === state.tick, `tick idéntico (real ${state.tick} == replay ${rebuilt.tick})`);
+  assert(rebuilt.wave === state.wave, `oleada idéntica (real ${state.wave} == replay ${rebuilt.wave})`);
+  assert(rebuilt.lives === state.lives, `vidas idénticas (real ${state.lives} == replay ${rebuilt.lives})`);
+  assert(rebuilt.rng === state.rng, `rng idéntico (real ${state.rng} == replay ${rebuilt.rng})`);
+  assert(rebuilt.nextId === state.nextId, `nextId idéntico (real ${state.nextId} == replay ${rebuilt.nextId})`);
+  assert(
+    JSON.stringify(realGold) === JSON.stringify(rebuiltGold),
+    `oro de cada jugador idéntico (real ${JSON.stringify(realGold)} == replay ${JSON.stringify(rebuiltGold)})`,
+  );
+  assert(
+    JSON.stringify(state.over) === JSON.stringify(rebuilt.over),
+    `resultado idéntico (over ${JSON.stringify(state.over)})`,
+  );
+
+  // el SEEK re-simula de 0 al tick destino y debe coincidir con el paso a paso
+  const mid = Math.floor(replay.finalTick / 2);
+  const seekState = replayTo(replay, mid);
+  const stepState = (() => {
+    const s2 = createGame(mapId, 'classic', 'normal', seed, players);
+    const ctx2 = makeSimContext(map, makePlacementContext(map));
+    while (s2.tick < mid && !s2.over) {
+      // aplicar roster + comandos de este tick igual que el motor de replay
+      for (const e of log) {
+        if (e.t !== s2.tick) continue;
+        if (e.kind === 'conn') {
+          const gp = s2.players.find((p) => p.id === e.playerId);
+          if (gp) gp.connected = e.connected;
+        }
+      }
+      const c = log.filter((e) => e.t === s2.tick && e.kind === 'cmd').map((e) =>
+        e.kind === 'cmd' ? { playerId: e.playerId, cmd: e.cmd } : (null as never),
+      );
+      stepGame(s2, ctx2, c as PlayerCommand[]);
+    }
+    return s2;
+  })();
+  assert(
+    seekState.tick === stepState.tick && seekState.rng === stepState.rng && seekState.lives === stepState.lives,
+    `el seek a tick ${mid} reconstruye el mismo estado (rng ${seekState.rng})`,
+  );
+
+  const bytes = JSON.stringify(replay).length;
+  console.log(`   replay: ${log.length} entradas, ${bytes} bytes (~${(bytes / 1024).toFixed(1)} KB), ${replay.finalTick} ticks`);
 }
 
 console.log('— Determinismo: misma semilla + mismos comandos → mismo estado —');

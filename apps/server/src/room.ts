@@ -6,6 +6,7 @@ import {
   makePlacementContext,
   makeSimContext,
   stepGame,
+  BALANCE_VERSION,
   GAME_SPEEDS,
   MAX_PLAYERS,
   PLAYER_COLORS,
@@ -16,6 +17,8 @@ import {
   type GameState,
   type LobbyPlayer,
   type PlayerCommand,
+  type ReplayData,
+  type ReplayEntry,
   type RoomSettings,
   type ServerMsg,
   type SimContext,
@@ -63,6 +66,10 @@ export class Room {
   private interval: ReturnType<typeof setInterval> | null = null;
   private paused = false;
   private speed = 1; // steps de simulación por tick de red (x1/x2/x3)
+  // ---- grabación de la repetición (replay) de la partida en curso ----
+  private replaySeed = 0;
+  private replayInit: { mapId: string; mode: RoomSettings['mode']; difficulty: RoomSettings['difficulty']; players: { id: string; name: string; color: string }[] } | null = null;
+  private replayLog: ReplayEntry[] = [];
   private lastPingAt = new Map<string, number>(); // rate-limit de pings por participante
   private nextPlayerNum = 1;
   private nextSpectatorNum = 1;
@@ -184,7 +191,14 @@ export class Room {
 
   private markConnected(playerId: string, connected: boolean) {
     const gp = this.game?.players.find((p) => p.id === playerId);
-    if (gp) gp.connected = connected;
+    if (gp && gp.connected !== connected) {
+      gp.connected = connected;
+      // grabar el cambio con el tick de sim en que ocurre: afecta a connectedCount
+      // (escalado de HP y presupuesto de oleada) → es crítico para el determinismo
+      if (this.game && !this.game.over) {
+        this.replayLog.push({ t: this.game.tick, kind: 'conn', playerId, connected });
+      }
+    }
   }
 
   // ---------- mensajería ----------
@@ -261,6 +275,16 @@ export class Room {
     this.paused = false;
     this.speed = 1;
 
+    // arrancar la grabación de la repetición: semilla, roster inicial y log vacío
+    this.replaySeed = seed;
+    this.replayInit = {
+      mapId: map.id,
+      mode: this.settings.mode,
+      difficulty: this.settings.difficulty,
+      players: this.game.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
+    };
+    this.replayLog = [];
+
     for (const p of this.players) {
       this.send(p, { type: 'game_started', init: this.gameInit(p.id) });
     }
@@ -274,6 +298,11 @@ export class Room {
     const cmds = this.pendingCmds;
     this.pendingCmds = [];
     const wasOver = this.game.over !== null;
+    // grabar los comandos con el TICK DE SIM en que se aplican: a x2/x3 solo se
+    // aplican en el PRIMER stepGame de la ráfaga, así que todos llevan game.tick de
+    // ANTES de ese primer paso (los siguientes pasos van sin comandos).
+    const cmdTick = this.game.tick;
+    for (const c of cmds) this.replayLog.push({ t: cmdTick, kind: 'cmd', playerId: c.playerId, cmd: c.cmd });
     // a velocidad x2/x3 se simulan varios pasos por tick de red (un solo snapshot)
     const events = stepGame(this.game, this.simCtx, cmds);
     for (let i = 1; i < this.speed && !this.game.over; i++) {
@@ -286,9 +315,28 @@ export class Room {
     }
   }
 
+  // Construye la ReplayData de la partida que acaba de terminar. Pequeña: los
+  // comandos de una partida son decenas, no miles. null si no hay grabación.
+  private buildReplay(g: GameState): ReplayData | undefined {
+    if (!this.replayInit) return undefined;
+    return {
+      v: BALANCE_VERSION,
+      seed: this.replaySeed,
+      mapId: this.replayInit.mapId,
+      mode: this.replayInit.mode,
+      difficulty: this.replayInit.difficulty,
+      players: this.replayInit.players,
+      log: this.replayLog,
+      finalTick: g.tick,
+      victory: g.over?.victory ?? false,
+      wave: g.wave,
+    };
+  }
+
   private endGame(): void {
     if (!this.game) return;
     const g = this.game;
+    const replay = this.buildReplay(g);
     const stats: EndStats = {
       victory: g.over?.victory ?? false,
       wave: g.wave,
@@ -324,7 +372,7 @@ export class Room {
       this.interval = null;
       this.game = null;
       this.simCtx = null;
-      this.broadcast({ type: 'game_over', stats });
+      this.broadcast({ type: 'game_over', stats, ...(replay ? { replay } : {}) });
       this.promoteSpectators();
       this.broadcastLobby();
     }, 1200);

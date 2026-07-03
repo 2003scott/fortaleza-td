@@ -8,8 +8,13 @@ import { applySpectatorUI, buildTowerBar, hidePanel, onTick, toast, addChat, ref
 import { hideEnd, homeError, initHome, initLobby, renderLobby, showEnd, switchScreen } from './screens.js';
 import { beam, burst, clearParticles, floatText, line, ring } from './particles.js';
 import { sfx, setSfxVolume, setMusicVolume, unlockAudio } from './audio.js';
+import { initReplayHome, saveReplay, setReplayEventSink, startReplay } from './replay.js';
+import type { ReplayData } from '@td/shared';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+
+// la repetición de la partida que acaba de terminar (para "🎬 Ver repetición")
+let lastReplay: ReplayData | null = null;
 
 // ---------- procesado de eventos de la simulación ----------
 
@@ -213,7 +218,20 @@ function wireNet(): void {
 
   net.on('game_over', (msg) => {
     if (store.game) store.game.over = msg.stats;
+    // guardar la repetición (localStorage, máx 10) y recordarla para el botón
+    // "🎬 Ver repetición" de la pantalla de fin.
+    let replay: ReplayData | null = msg.replay ?? null;
+    if (replay) {
+      try {
+        saveReplay(replay);
+      } catch {
+        // guardar es best-effort; aun sin guardar, se puede ver la recién terminada
+      }
+    }
+    lastReplay = replay;
     showEnd(msg.stats);
+    const btn = document.getElementById('btn-watch-replay') as HTMLButtonElement;
+    btn.hidden = !replay;
   });
 
   net.on('chat', (msg) => addChat(msg.from, msg.color, msg.text));
@@ -374,6 +392,13 @@ function wireHudButtons(): void {
     renderLobby();
   });
 
+  // 🎬 Ver repetición: reproduce la partida que acaba de terminar (sin red)
+  $('btn-watch-replay').addEventListener('click', () => {
+    if (!lastReplay) return;
+    hideEnd();
+    startReplay(lastReplay);
+  });
+
   // chat dentro del juego; en móvil la clase .open muestra también el log
   const chatForm = $('game-chat-form');
   const chatInput = $<HTMLInputElement>('game-chat-input');
@@ -426,6 +451,9 @@ initHome();
 initLobby();
 wireHudButtons();
 wireNet();
+// el reproductor de repeticiones reusa el MISMO pipeline de eventos que la red
+setReplayEventSink(processEvents);
+initReplayHome();
 switchScreen('home');
 
 // enlace directo ?n=Nombre#SALA: entra a la sala sin pasar por el formulario

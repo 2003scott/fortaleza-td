@@ -3,6 +3,7 @@ import type {
   GameInit,
   LobbyPlayer,
   MapDef,
+  ReplayData,
   RoomSettings,
   Snap,
   TowerTypeId,
@@ -73,7 +74,18 @@ export const store = {
     inGame: false,
   },
   game: null as GameStore | null,
+  // reproductor de repeticiones: no-null mientras se reproduce una (desactiva el
+  // input de juego y corre la sim localmente sin red). Ver replay.ts del cliente.
+  replay: null as ReplayState | null,
 };
+
+// estado del reproductor de repeticiones en curso (null = no estamos viendo una)
+export interface ReplayState {
+  data: ReplayData;
+  playing: boolean;
+  tick: number; // tick de sim actual del reproductor
+  speed: number; // x1 / x2 / x4
+}
 
 if (!store.token) {
   store.token = randomToken();
