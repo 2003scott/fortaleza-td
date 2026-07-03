@@ -25,6 +25,30 @@ y deben ejecutarse con ese modelo.
 
 ---
 
+## Robos de Green TD (fuente: `GREENTD.md`, ingeniería inversa del original)
+
+Mecánicas verificadas en el JASS/binario del Green TD real, mapeadas a su tarea:
+
+| Mecánica (número original) | Destino | Nota |
+|---|---|---|
+| **Inmunidad mágica** — oleada inmune cada 5 niveles; anula hielo/veneno/hechizos, solo entra daño físico | **F4.1** | El tercer eje táctico que nos falta; castiga el mono-build |
+| **Fuga escalonada** — leak quita 1 vida antes de la oleada 10, luego `1+floor(oleada/10)` | **F4.1** | Con subida de vidas base (20→30) para compensar; tensión creciente |
+| **Oleada bonus riesgo/recompensa** — ~1/15 desde la oleada 6: enemigos buffeados (+HP/+armor/+evasión/+regen/+velocidad) a cambio de más oro | **F4.1** | Reutiliza nuestra infraestructura de AFIJOS: "oleada bendecida" = un afijo común a toda la oleada + botín ×1.5 |
+| **Telegrafiar amenazas** — los comandos `-air/-immune/-hero` solo INFORMAN los niveles duros | **F4.1** | La vista previa de oleada gana etiqueta de tipo (🦅 aérea / 🛡 inmune / ⭐ bonus) y aviso anticipado |
+| **Auras Damage/Speed con ramas y niveles** (torre `hatw`: 750→1500 oro, 4 niveles, rama Speed O Damage) | **F1.2** | Valida el Estandarte tal como está diseñado (3 niveles + specs Guerra/Celeridad) |
+| **Procs on-attack con roles** — crecimiento permanente (+100 daño al 1%), shred de armadura AoE (3%), oro por ataque (`LVL×2/3/4`), ejecución 75% de la vida ACTUAL | **F4.2** | Identidades para el Rango II de specs y las torres nuevas (el Alquimista ya cubre el proc de oro) |
+| **Curva de precios** — coste ~lineal, daño exponencial, cooldown decreciente por tier | **F4.2/F5.1** | Guía para preciar el Rango II sin romper la economía |
+
+**Descartados conscientemente** (documentado para no re-discutirlo):
+- *Loop de creeps*: Green TD NO lo hacía (los leaks se eliminan con `KillUnit`). Nuestro **Modo Horda (F2.2) es diseño original nuestro** — se mantiene.
+- *Matriz completa attack-type × armor-type* (5×6 de WC3): demasiada complejidad para el
+  jugador casual; nuestros 3 ejes (tierra/aire + armadura plana con `pierceArmor` +
+  inmunidad mágica de F4.1) capturan el 90% de la profundidad con 20% del coste.
+- *Madera como segunda divisa* y *base-gating de tiers* (Castle→Fortress→Citadel):
+  fricción sin beneficio claro en partidas de 20-40 min. Quizás para un modo campaña futuro.
+
+---
+
 ## Fase 1 — Victorias rápidas (todas Opus 4.8, ejecutar en este orden)
 
 ### F1.1 · Mapas más grandes + minimapa — Opus 4.8 · riesgo bajo-medio
@@ -175,7 +199,7 @@ Que suene BIEN es la parte difícil; por eso va a Fable-5.
 
 ## Fase 4 — Gran contenido
 
-### F4.1 · +5 monstruos y +2 jefes — Opus 4.8 · riesgo medio
+### F4.1 · +5 monstruos, +2 jefes y sistema de oleadas Green TD — Opus 4.8 · riesgo medio-alto
 
 Solo enemigos que crean decisiones nuevas (añadir al FINAL de `ENEMY_ORDER`):
 
@@ -188,20 +212,54 @@ Solo enemigos que crean decisiones nuevas (añadir al FINAL de `ENEMY_ORDER`):
 - Jefes: **Quimera** (oleada 15 del clásico, VOLADORA — invalida cañón/mortero y
   obliga a doble build) y **Behemot** (oleada 25+ del infinito/horda, aplasta:
   aturde todas las torres en radio 2 al cruzar cada esquina).
-- simtest: pool de oleadas los incluye, bots siguen ganando el clásico en normal.
+
+**Sistema de oleadas robado de Green TD** (ver tabla "Robos" arriba y `GREENTD.md` §1/§3/§4/§7):
+
+- **Inmunidad mágica**: `EnemyDef`/`EnemyState` ganan flag `spellImmune`. Efecto en la
+  sim: inmune al slow del hielo (y al aura de Escarcha), inmune al veneno (DoT), el
+  Tesla les hace −70% de daño y `execute` no los remata. Las torres físicas (arquero,
+  cañón, francotirador, mortero) pegan normal. **Cada 5 oleadas (10, 15, 20…) la
+  oleada sale inmune** (marcado en `generateWave`; los élites de esa oleada también).
+  Render: escudo runado ✨ visible + tinte. HUD: la vista previa lo anuncia.
+- **Fuga escalonada**: el leak cuesta `livesCost + floor(oleada/10)` vidas (élites
+  siguen sumando su extra). Subir `START_LIVES` 20→30 para compensar.
+- **Oleada bendecida (bonus)**: desde la oleada 6, ~1/15 de probabilidad (RNG de la
+  sim, determinista) de que TODA la oleada gane un afijo común (reutilizar
+  `makeElite`-lite: solo el afijo, sin ×2.6 HP) + `bountyMult ×1.5` + bono de fin de
+  oleada ×1.5. Vista previa: "⭐ ¡Oleada bendecida: doble botín!".
+- **Telegrafiar amenazas**: la vista previa de próxima oleada gana etiqueta de tipo
+  (🦅 aérea si domina lo volador / 🛡 inmune / ⭐ bendecida), y al inicio de partida
+  un mensaje de sistema anuncia los niveles inmunes ("cada 5") y de jefe ("cada 10").
+
+- Bump de `BALANCE_VERSION`. simtest: pool incluye los nuevos, aparecen oleadas
+  inmunes/bendecidas en 20 oleadas, bots siguen ganando el clásico en normal, y las
+  torres mágicas hacen ~0 daño de efecto a inmunes (assert dirigido).
 
 ### F4.2 · +2 torres y rango II de especializaciones — Opus 4.8 · riesgo medio
 
 - **Trampa de púas 🪤** — la ÚNICA construible sobre el camino (relajar
   `placementError` por tipo): daña a quien pasa encima, 20 cargas y se vende sola.
-  Abre el camino como espacio táctico.
+  Abre el camino como espacio táctico. (Eco de la Fire Trap de Green TD; la nuestra
+  es física, así que SÍ funciona contra inmunes — nicho claro.)
 - **Alquimista ⚗️** — aura económica: +30% de bounty por bajas dentro de su radio
-  (no se apila; reutiliza la infraestructura de auras del Estandarte).
+  (no se apila; reutiliza la infraestructura de auras del Estandarte). Es nuestra
+  versión del proc de oro de la Spell Tower de Green TD, pero determinista.
 - **Rango II de especialización** («más niveles»): cada especialización puede
-  mejorarse UNA vez más (p. ej. Ballesta Repetidora II: 4 disparos): `TowerSpecDef`
-  gana `rank2: {cost, ...overrides}`; `TowerState.spec` sigue igual y `level` pasa a
-  4 para representarlo. Visual: segunda corona/gema. Es la forma de subir el techo
-  sin reequilibrar los niveles 1-3.
+  mejorarse UNA vez más: `TowerSpecDef` gana `rank2: {cost, ...overrides}`;
+  `TowerState.spec` sigue igual y `level` pasa a 4 para representarlo. Visual:
+  segunda corona/gema.
+  **Identidades del Rango II robadas de los procs de Green TD** (`GREENTD.md` §6.2)
+  — que cada rango II no sea "+20% stats" sino una mecánica con rol:
+  - *Ballesta Repetidora II*: 4 disparos (el multidisparo clásico).
+  - *Cañón de Riel II*: la ejecución pasa de umbral a **75% de la vida ACTUAL**
+    (anti-tanque; no funciona contra inmunes — contrapeso de Green TD).
+  - *Obús II / Metralla II*: proc de **shred**: 3% por impacto de reducir a la mitad
+    la armadura de los enemigos en radio 1.5 durante 4 s (habilita al resto).
+  - *Arco Largo II o Explorador II*: **crecimiento permanente** — 1% por disparo de
+    ganar +8 de daño base para siempre (recompensa conservar la torre).
+  - Resto de rangos II: mejora numérica fuerte siguiendo la curva Green TD
+    (coste ~lineal, daño exponencial, cadencia a la baja).
+- Bump de `BALANCE_VERSION`. simtest: bots alcanzan algún rango II y ganan igual.
 
 ### F4.3 · 🧠 Fusión de torres — **FABLE-5** · riesgo ALTO (diseño + balance)
 
