@@ -72,6 +72,11 @@ function processEvents(events: GameEvent[]): void {
         else sfx.death(pan);
         break;
       }
+      case 'shred':
+        // proc de shred de armadura (Obús/Metralla II): anillo naranja + chispas
+        ring(ev.x, ev.y, ev.r, '#ff9800');
+        burst(ev.x, ev.y, '#ffcc80', 6, 1.6);
+        break;
       case 'miss':
         floatText(ev.x, ev.y - 0.2, '¡esquivó!', '#e0e0e0', 11);
         break;

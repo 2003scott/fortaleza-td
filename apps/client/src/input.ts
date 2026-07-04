@@ -15,6 +15,7 @@ const PLACE_ERRORS: Record<Exclude<PlacementError, null>, string> = {
   camino: 'No se puede construir sobre el camino',
   bloqueado: 'Esa celda está bloqueada',
   ocupado: 'Ya hay una torre en esa celda',
+  fuera_camino: 'La Trampa solo se coloca SOBRE el camino',
 };
 
 function cellFromPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number): { cx: number; cy: number } | null {
@@ -74,7 +75,7 @@ function sendPlace(cx: number, cy: number, keepPlacing: boolean): void {
   const gs = store.game;
   if (!gs || gs.selection?.kind !== 'placing' || !gs.latest) return;
   const towers = gs.latest.towers.map((t) => ({ cx: t[2], cy: t[3] }));
-  const err = placementError(gs.map, getPlacementCtx(gs.map), towers, cx, cy);
+  const err = placementError(gs.map, getPlacementCtx(gs.map), towers, cx, cy, gs.selection.towerType);
   if (err) {
     toast(PLACE_ERRORS[err]);
     return;

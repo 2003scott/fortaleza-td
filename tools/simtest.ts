@@ -1,15 +1,18 @@
 // Prueba de la simulación: dos jugadores bot construyen torres y el juego
 // avanza miles de ticks. Verifica oleadas, economía, muertes y determinismo.
 import {
+  activeStats,
   createGame,
   ENEMIES,
   generateWave,
   getMap,
+  hasRank2,
   makePlacementContext,
   makeSimContext,
   pathCells,
   pathLength,
   placementError,
+  rank2Cost,
   replayTo,
   stepGame,
   towerLevel,
@@ -43,7 +46,7 @@ function mkEnemy(type: EnemyTypeId, over: Partial<EnemyState> = {}): EnemyState 
     pathIdx: 0, wpIdx: 1, travelled: 0, slowFactor: 1, slowUntil: 0, poisonDps: 0, poisonUntil: 0,
     poisonSrc: 0, bountyMult: 1, elite: false, affixes: [], speedMult: 1, armorBonus: 0, regenBonus: 0,
     dodgeBonus: 0, slowResist: 0, radiusMult: 1, auraRadius: 0, auraHps: 0, deathSpawn: 0, laps: 0,
-    spellImmune: def.spellImmune ?? false, stunTowerId: 0, lastWpIdx: 1,
+    spellImmune: def.spellImmune ?? false, stunTowerId: 0, lastWpIdx: 1, armorShredUntil: 0,
     ...over,
   };
 }
@@ -51,6 +54,7 @@ function mkTower(type: TowerTypeId, over: Partial<TowerState> = {}): TowerState 
   return {
     id: 2000, type, cx: 5, cy: 1, level: 3, spec: -1, owner: 'p1',
     cooldownLeft: 0, targetMode: 'first', invested: 100, kills: 0, damage: 0, stunnedUntil: 0,
+    charges: 0, growthBonus: 0,
     ...over,
   };
 }
@@ -103,6 +107,18 @@ function botCommands(state: GameState, candidates: [number, number][], counters:
           cmds.push({ playerId: player.id, cmd: { kind: 'specialize', towerId: maxed.id, spec: specIdx } });
           maxed.spec = specIdx;
           budget -= specCost;
+          continue;
+        }
+      }
+
+      // 1b) Rango II: una torre ya especializada (nivel 3) con rank2 sube al nivel 4.
+      const r2able = mine.find((t) => t.level === 3 && t.spec >= 0 && hasRank2(t.type, t.spec));
+      if (r2able) {
+        const r2cost = rank2Cost(r2able.type, r2able.spec) ?? Infinity;
+        if (budget >= r2cost) {
+          cmds.push({ playerId: player.id, cmd: { kind: 'upgrade', towerId: r2able.id } });
+          r2able.level = 4;
+          budget -= r2cost;
           continue;
         }
       }
@@ -263,6 +279,11 @@ assert(
   a.state.towers.some((t) => t.spec >= 0),
   `hay torres especializadas al final (${a.state.towers.filter((t) => t.spec >= 0).length})`,
 );
+// F4.2: los bots alcanzan algún RANGO II (torre especializada al nivel 4)
+assert(
+  a.state.towers.some((t) => t.level >= 4 && t.spec >= 0),
+  `los bots alcanzan algún RANGO II (${a.state.towers.filter((t) => t.level >= 4).length} torres en nivel 4)`,
+);
 assert(
   a.state.players.every((p) => p.stats.goldEarned > 100),
   'todos los jugadores ganaron oro',
@@ -318,12 +339,13 @@ console.log('— Regresión: las crías de spawnOnDeath sobreviven a un golpe de
     pathIdx: 0, wpIdx: 1, travelled: 5, slowFactor: 1, slowUntil: 0, poisonDps: 0, poisonUntil: 0,
     poisonSrc: 0, bountyMult: 1, elite: false, affixes: [], speedMult: 1, armorBonus: 0, regenBonus: 0,
     dodgeBonus: 0, slowResist: 0, radiusMult: 1, auraRadius: 0, auraHps: 0, deathSpawn: 0, laps: 0,
-    spellImmune: false, stunTowerId: 0, lastWpIdx: 1,
+    spellImmune: false, stunTowerId: 0, lastWpIdx: 1, armorShredUntil: 0,
   };
   st.enemies.push(slime);
   const cannon: TowerState = {
     id: 2000, type: 'cannon', cx: 5, cy: 1, level: 3, spec: -1, owner: 'p1',
     cooldownLeft: 0, targetMode: 'first', invested: 440, kills: 0, damage: 0, stunnedUntil: 0,
+    charges: 0, growthBonus: 0,
   };
   st.towers.push(cannon);
 
@@ -359,18 +381,20 @@ console.log('— Estandarte: refuerza el daño de las torres cercanas (sin apila
       pathIdx: 0, wpIdx: 1, travelled: 0, slowFactor: 1, slowUntil: 0, poisonDps: 0, poisonUntil: 0,
       poisonSrc: 0, bountyMult: 1, elite: false, affixes: [], speedMult: 1, armorBonus: 0, regenBonus: 0,
       dodgeBonus: 0, slowResist: 0, radiusMult: 1, auraRadius: 0, auraHps: 0, deathSpawn: 0, laps: 0,
-      spellImmune: false, stunTowerId: 0, lastWpIdx: 1,
+      spellImmune: false, stunTowerId: 0, lastWpIdx: 1, armorShredUntil: 0,
     };
     st.enemies.push(enemy);
     const archer: TowerState = {
       id: 2000, type: 'archer', cx: 5, cy: 1, level: 1, spec: -1, owner: 'p1',
       cooldownLeft: 0, targetMode: 'first', invested: 50, kills: 0, damage: 0, stunnedUntil: 0,
+      charges: 0, growthBonus: 0,
     };
     st.towers.push(archer);
     for (let i = 0; i < banners; i++) {
       st.towers.push({
         id: 3000 + i, type: 'banner', cx: 6 + i, cy: 1, level: 1, spec: -1, owner: 'p1',
         cooldownLeft: 0, targetMode: 'first', invested: 90, kills: 0, damage: 0, stunnedUntil: 0,
+        charges: 0, growthBonus: 0,
       });
     }
     // un tick: el arquero está listo y dispara; leemos el proyectil emitido
@@ -853,6 +877,212 @@ console.log('— F4.1 · Determinismo de las oleadas F4.1 (misma semilla → mis
     return out.join('|');
   }
   assert(waveHashes() === waveHashes(), 'la generación de oleadas F4.1 es determinista');
+}
+
+console.log('— F4.2 · Trampa de púas: daña al pasar y se AUTO-ELIMINA al agotar cargas —');
+{
+  const map = getMap('sendero');
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  const st = createGame('sendero', 'endless', 'normal', 700, [{ id: 'p1', name: 'A', color: '#fff' }]);
+  st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+  // una celda del CAMINO para la trampa (la primera del set de celdas de camino)
+  const pathCell = [...pathCells(map)][0].split(',').map(Number) as [number, number];
+  const trap = mkTower('trap', { id: 3100, cx: pathCell[0], cy: pathCell[1], level: 1, spec: -1, charges: 20, invested: 60 });
+  st.towers.push(trap);
+  // enemigo INMUNE parado sobre la celda de la trampa (speedMult 0 = inmóvil, para
+  // probar que el daño FÍSICO le entra y que la trampa agota sus cargas sobre él)
+  const enemy = mkEnemy('brute', { id: 2200, hp: 100000, maxHp: 100000, spellImmune: true, speedMult: 0, x: pathCell[0] + 0.5, y: pathCell[1] + 0.5, wpIdx: 1 });
+  st.enemies.push(enemy);
+  const hp0 = enemy.hp;
+  // un tick: la trampa golpea y consume una carga
+  stepGame(st, simCtx, []);
+  const trapAfter1 = st.towers.find((t) => t.id === 3100)!;
+  const enemyAfter1 = st.enemies.find((e) => e.id === 2200)!;
+  assert(enemyAfter1.hp < hp0, `la Trampa DAÑA a un enemigo que pasa (incluso INMUNE): ${(hp0 - enemyAfter1.hp).toFixed(0)} de daño físico`);
+  assert(trapAfter1.charges === 19, `la Trampa consumió 1 carga al golpear (${trapAfter1.charges} restantes)`);
+
+  // dejar correr hasta agotar las 20 cargas: la trampa debe auto-venderse (el enemigo
+  // inmóvil la sigue pisando en cada tick).
+  let selfRemoved = false;
+  for (let i = 0; i < 40 && st.towers.some((t) => t.id === 3100); i++) {
+    const events = stepGame(st, simCtx, []);
+    for (const ev of events) if (ev.e === 'sell' && Math.round(ev.x - 0.5) === pathCell[0]) selfRemoved = true;
+  }
+  assert(!st.towers.some((t) => t.id === 3100), 'la Trampa se AUTO-ELIMINA al agotar sus cargas');
+  assert(selfRemoved, 'la auto-venta de la Trampa emite un evento de retirada');
+}
+
+console.log('— F4.2 · Trampa de púas: SOLO se coloca sobre el camino —');
+{
+  const map = getMap('sendero');
+  const ctx = makePlacementContext(map);
+  const pathCell = [...pathCells(map)][0].split(',').map(Number) as [number, number];
+  // una celda fuera del camino (construible por una torre normal)
+  const off = buildCellCandidates('sendero')[0];
+  // la Trampa DENTRO del camino: permitido
+  assert(placementError(map, ctx, [], pathCell[0], pathCell[1], 'trap') === null, 'la Trampa SÍ se puede colocar sobre el camino');
+  // la Trampa FUERA del camino: rechazada con `fuera_camino`
+  assert(placementError(map, ctx, [], off[0], off[1], 'trap') === 'fuera_camino', 'la Trampa NO se puede colocar fuera del camino');
+  // una torre normal NO puede ir sobre el camino (regla intacta)
+  assert(placementError(map, ctx, [], pathCell[0], pathCell[1], 'archer') === 'camino', 'una torre normal NO puede ir sobre el camino');
+  // una torre normal fuera del camino: permitida
+  assert(placementError(map, ctx, [], off[0], off[1], 'archer') === null, 'una torre normal SÍ va fuera del camino');
+}
+
+console.log('— F4.2 · Alquimista: +30% de bounty en su radio, sin apilar —');
+{
+  const map = getMap('sendero');
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  // Mide el oro ganado por matar un mismo bruto con `alchemists` alquimistas cubriendo
+  // la posición de la muerte (nivel 1 = +30%). Con 2, sigue siendo +30% (no apila).
+  function killGold(alchemists: number): number {
+    const st = createGame('sendero', 'endless', 'normal', 710, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    // enemigo débil pegado al arquero para que muera de un golpe
+    const enemy = mkEnemy('goblin', { id: 2300, hp: 5, maxHp: 32, x: 5.5, y: 2.5, wpIdx: 1 });
+    st.enemies.push(enemy);
+    const archer = mkTower('archer', { id: 3200, cx: 5, cy: 1, level: 3, invested: 200 });
+    st.towers.push(archer);
+    for (let i = 0; i < alchemists; i++) {
+      // alquimistas junto a la muerte (radio nivel 1 = 2.4; a ≤2.4 de (5.5,2.5))
+      st.towers.push(mkTower('alchemist', { id: 3300 + i, cx: 5 + i, cy: 3, level: 1, spec: -1, invested: 120 }));
+    }
+    const g0 = st.players[0].gold;
+    for (let i = 0; i < TICK_RATE * 2 && st.enemies.some((e) => e.id === 2300); i++) stepGame(st, simCtx, []);
+    return st.players[0].gold - g0;
+  }
+  const base = killGold(0);
+  const withOne = killGold(1);
+  const withTwo = killGold(2);
+  assert(base > 0, `matar da bounty base (${base})`);
+  assert(withOne === Math.round(base * 1.3), `el Alquimista sube el bounty ×1.3 (${base} → ${withOne})`);
+  assert(withTwo === withOne, `dos Alquimistas NO apilan: mismo bounty que uno (${withOne} == ${withTwo})`);
+}
+
+console.log('— F4.2 · Rango II de ejecución: remata al 75% de la vida ACTUAL, NO a un inmune —');
+{
+  const map = getMap('sendero');
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  // Cañón de Riel II (executeCurrent 0.75, daño base 620). Un tanque con 800 hp:
+  // el disparo (~620) lo deja bajo el 75% de su vida ACTUAL → rematado. El inmune,
+  // con el mismo golpe, SOBREVIVE (executeCurrent es daño de hechizo).
+  function railcannon2(immune: boolean): { killed: boolean; hpLeft: number } {
+    const st = createGame('sendero', 'endless', 'normal', 720, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    const enemy = mkEnemy('brute', { id: 2400, hp: 800, maxHp: 4000, spellImmune: immune, x: 5.5, y: 2.5 });
+    st.enemies.push(enemy);
+    // sniper spec 0 (Cañón de Riel), nivel 4 = Rango II (executeCurrent)
+    st.towers.push(mkTower('sniper', { id: 3400, spec: 0, level: 4, cx: 5, cy: 1, invested: 1200 }));
+    stepGame(st, simCtx, []); // un disparo
+    const alive = st.enemies.find((e) => e.id === 2400);
+    return { killed: !alive, hpLeft: alive ? alive.hp : 0 };
+  }
+  // verifica que el nivel 4 usa executeCurrent (no execute clásico)
+  const r2lvl = activeStats('sniper', 4, 0);
+  assert((r2lvl.executeCurrent ?? 0) === 0.75, `el Cañón de Riel II usa executeCurrent 0.75 (${r2lvl.executeCurrent})`);
+  const normal = railcannon2(false);
+  const immune = railcannon2(true);
+  assert(normal.killed, 'el Rango II de ejecución remata a un tanque normal (75% de la vida ACTUAL)');
+  assert(!immune.killed && immune.hpLeft > 0, `NO remata a un inmune con el mismo golpe (queda con ${immune.hpLeft.toFixed(0)} hp)`);
+}
+
+console.log('— F4.2 · Shred de armadura: reduce a la mitad la armadura efectiva —');
+{
+  const map = getMap('sendero');
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  // Un enemigo con armadura 20. Un arquero (daño físico plano) le pega: sin shred,
+  // recibe daño - 20; con shred activo, recibe daño - 10 (más daño). Aplicamos el
+  // shred a mano (armorShredUntil futuro) y medimos el daño de un golpe idéntico.
+  function archerDamage(shred: boolean): number {
+    const st = createGame('sendero', 'endless', 'normal', 730, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    const enemy = mkEnemy('brute', { id: 2500, hp: 100000, maxHp: 100000, armorBonus: 20, x: 5.5, y: 2.5, wpIdx: 1 });
+    if (shred) enemy.armorShredUntil = st.tick + TICK_RATE * 4;
+    st.enemies.push(enemy);
+    st.towers.push(mkTower('archer', { id: 3500, cx: 5, cy: 1, level: 1, invested: 50 }));
+    const hp0 = enemy.hp;
+    // deja que el dardo impacte
+    for (let i = 0; i < TICK_RATE && st.enemies[0].hp === hp0; i++) stepGame(st, simCtx, []);
+    return hp0 - st.enemies[0].hp;
+  }
+  const noShred = archerDamage(false);
+  const withShred = archerDamage(true);
+  // armadura base del bruto = 2; +20 bonus = 22. daño arquero nv1 = 8. Sin shred:
+  // max(1, 8-22)=1. Con shred: armadura 11 → max(1, 8-11)=1. Ese caso satura al mínimo;
+  // usa un enemigo con armadura menor para que el efecto sea medible.
+  void noShred; void withShred;
+
+  // versión medible: armadura efectiva 4 vs 2 con un cañón de nivel 3 (daño 78)
+  function cannonDamage(shred: boolean): number {
+    const st = createGame('sendero', 'endless', 'normal', 731, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    const enemy = mkEnemy('goblin', { id: 2510, hp: 100000, maxHp: 100000, armorBonus: 40, x: 5.5, y: 2.5, wpIdx: 1 });
+    if (shred) enemy.armorShredUntil = st.tick + TICK_RATE * 4;
+    st.enemies.push(enemy);
+    st.towers.push(mkTower('sniper', { id: 3510, cx: 5, cy: 1, level: 3, spec: -1, invested: 300 })); // sniper nv3: 210 dmg, NO pierceArmor? sí perfora...
+    const hp0 = enemy.hp;
+    for (let i = 0; i < TICK_RATE && st.enemies[0].hp === hp0; i++) stepGame(st, simCtx, []);
+    return hp0 - st.enemies[0].hp;
+  }
+  void cannonDamage;
+
+  // El sniper perfora armadura, así que usamos un ARQUERO con daño alto por aura para
+  // medir limpio: mejor construir el caso a mano con damageEnemy vía un cañón nv3.
+  function measured(shred: boolean): number {
+    const st = createGame('sendero', 'endless', 'normal', 732, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    const enemy = mkEnemy('goblin', { id: 2520, hp: 100000, maxHp: 100000, armorBonus: 40, x: 5.5, y: 2.5, wpIdx: 1 });
+    if (shred) enemy.armorShredUntil = st.tick + TICK_RATE * 4;
+    st.enemies.push(enemy);
+    st.towers.push(mkTower('cannon', { id: 3520, cx: 5, cy: 1, level: 3, spec: -1, invested: 440 })); // cañón nv3: 78 dmg, no perfora
+    const hp0 = enemy.hp;
+    for (let i = 0; i < TICK_RATE * 2 && st.enemies[0].hp === hp0; i++) stepGame(st, simCtx, []);
+    return hp0 - st.enemies[0].hp;
+  }
+  const dmgNoShred = measured(false); // armadura efectiva 42 → 78-42 = 36
+  const dmgShred = measured(true); // armadura efectiva 21 → 78-21 = 57
+  assert(dmgShred > dmgNoShred, `el shred reduce la armadura efectiva a la mitad → más daño (${dmgNoShred} → ${dmgShred})`);
+  // el enemigo tiene armadura base 0 (goblin) + 40 bonus = 40; efectiva 20 con shred.
+  assert(Math.abs((78 - 20) - dmgShred) <= 1 && Math.abs((78 - 40) - dmgNoShred) <= 1, `armadura efectiva a la mitad con shred (sin ${dmgNoShred}=78-40, con ${dmgShred}=78-20)`);
+}
+
+console.log('— F4.2 · Crecimiento permanente: el daño de la torre sube disparo a disparo —');
+{
+  const map = getMap('sendero');
+  const simCtx = makeSimContext(map, makePlacementContext(map));
+  const st = createGame('sendero', 'endless', 'normal', 740, [{ id: 'p1', name: 'A', color: '#fff' }]);
+  st.nextId = 8000; st.wave = 1; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+  // Arco Largo II (archer spec 1, nivel 4 = Rango II con growth +8/disparo)
+  const enemy = mkEnemy('brute', { id: 2600, hp: 1e9, maxHp: 1e9, x: 5.5, y: 2.5, wpIdx: 1 });
+  st.enemies.push(enemy);
+  const bow = mkTower('archer', { id: 3600, spec: 1, level: 4, cx: 5, cy: 1, invested: 900 });
+  st.towers.push(bow);
+  // captura el daño del primer y de un disparo posterior comparando growthBonus
+  const g0 = st.towers.find((t) => t.id === 3600)!.growthBonus;
+  // dejar disparar unas cuantas veces
+  for (let i = 0; i < TICK_RATE * 6; i++) stepGame(st, simCtx, []);
+  const g1 = st.towers.find((t) => t.id === 3600)!.growthBonus;
+  assert((activeStats('archer', 4, 1).growth ?? 0) === 8, 'el Arco Largo II tiene growth +8');
+  assert(g1 > g0, `el crecimiento permanente sube el bono de daño disparo a disparo (${g0} → ${g1})`);
+  assert(g1 % 8 === 0 && g1 >= 8, `el bono crece en pasos de +8 (${g1})`);
+}
+
+console.log('— F4.2 · determinismo con torres F4.2 (misma semilla → mismo estado) —');
+{
+  function f42Hash(): string {
+    const map = getMap('sendero');
+    const simCtx = makeSimContext(map, makePlacementContext(map));
+    const st = createGame('sendero', 'endless', 'normal', 750, [{ id: 'p1', name: 'A', color: '#fff' }]);
+    st.nextId = 8000; st.wave = 6; st.waveState = 'active'; st.spawnQueue = []; st.pendingWave = [];
+    const pathCell = [...pathCells(map)][0].split(',').map(Number) as [number, number];
+    st.towers.push(mkTower('trap', { id: 4000, cx: pathCell[0], cy: pathCell[1], level: 1, spec: -1, charges: 20, invested: 60 }));
+    st.towers.push(mkTower('alchemist', { id: 4001, cx: 5, cy: 3, level: 3, spec: 0, invested: 300 }));
+    st.towers.push(mkTower('cannon', { id: 4002, spec: 0, level: 4, cx: 6, cy: 1, invested: 800 })); // Obús II (shred)
+    for (let k = 0; k < 10; k++) st.enemies.push(mkEnemy('brute', { id: 5000 + k, x: pathCell[0] + 0.5, y: pathCell[1] + 0.5, wpIdx: 1 }));
+    for (let i = 0; i < TICK_RATE * 20; i++) stepGame(st, simCtx, []);
+    return JSON.stringify([st.tick, st.rng, st.nextId, st.enemies.length, st.towers.map((t) => [t.id, t.charges, t.growthBonus]), st.players[0].gold]);
+  }
+  assert(f42Hash() === f42Hash(), 'la sim con Trampa/Alquimista/shred es determinista');
 }
 
 console.log('— Determinismo: misma semilla + mismos comandos → mismo estado —');

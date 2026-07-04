@@ -32,6 +32,9 @@ export const TOWER_ICONS: Record<TowerTypeId, string> = {
   mortar: '🧨',
   bank: '💰',
   banner: '🚩',
+  // F4.2
+  trap: '🪤',
+  alchemist: '⚗️',
 };
 
 export const ENEMY_ICONS: Record<EnemyTypeId, string> = {
@@ -1116,9 +1119,12 @@ export function computeBannerAuras(snap: Snap): Map<number, ClientAura> {
     const by = banner[3] + 0.5;
     for (const tw of snap.towers) {
       if (tw[0] === banner[0]) continue;
-      const tlvl = activeStats(TOWER_ORDER[tw[1]], tw[4], tw[9] ?? -1);
+      const twType = TOWER_ORDER[tw[1]];
+      const tlvl = activeStats(twType, tw[4], tw[9] ?? -1);
       if (tlvl.auraDamage !== undefined || tlvl.auraHaste !== undefined) continue; // otro estandarte
       if (tlvl.incomePerWave) continue; // la mina
+      if (tlvl.auraBounty !== undefined) continue; // el Alquimista (no dispara)
+      if (TOWERS[twType].onPathOnly) continue; // la Trampa de púas
       if (Math.hypot(bx - (tw[2] + 0.5), by - (tw[3] + 0.5)) > blvl.range) continue;
       let a = out.get(tw[0]);
       if (!a) {
@@ -1144,9 +1150,12 @@ export function countBannerTargets(snap: Snap, bannerId: number): number {
   let n = 0;
   for (const tw of snap.towers) {
     if (tw[0] === bannerId) continue;
-    const tlvl = activeStats(TOWER_ORDER[tw[1]], tw[4], tw[9] ?? -1);
+    const twType = TOWER_ORDER[tw[1]];
+    const tlvl = activeStats(twType, tw[4], tw[9] ?? -1);
     if (tlvl.auraDamage !== undefined || tlvl.auraHaste !== undefined) continue;
     if (tlvl.incomePerWave) continue;
+    if (tlvl.auraBounty !== undefined) continue;
+    if (TOWERS[twType].onPathOnly) continue;
     if (Math.hypot(bx - (tw[2] + 0.5), by - (tw[3] + 0.5)) > blvl.range) continue;
     n++;
   }
@@ -1193,6 +1202,20 @@ function drawTowers(gs: GameStore, interp: InterpResult | null, now: number, dt:
       g.arc(toX(cx + 0.5), toY(cy + 0.5), lvl.slowAura.radius * s, 0, Math.PI * 2);
       g.fill();
       g.stroke();
+    }
+
+    // aura del Alquimista: anillo verde en el suelo (como el dorado del Estandarte).
+    if (lvl.auraBounty !== undefined && lvl.auraBounty > 0) {
+      const pulse = 0.5 + Math.sin(t * 2.4) * 0.12;
+      g.fillStyle = `rgba(76,175,80,${0.05 + pulse * 0.05})`;
+      g.strokeStyle = `rgba(129,199,132,${0.4 + pulse * 0.2})`;
+      g.lineWidth = 1.5;
+      g.setLineDash([s * 0.18, s * 0.12]);
+      g.beginPath();
+      g.arc(toX(cx + 0.5), toY(cy + 0.5), lvl.range * s, 0, Math.PI * 2);
+      g.fill();
+      g.stroke();
+      g.setLineDash([]);
     }
 
     // aura del Estandarte: anillo cálido en el suelo, siempre visible. El tono
@@ -1252,6 +1275,29 @@ function drawTowers(gs: GameStore, interp: InterpResult | null, now: number, dt:
     g.save();
     g.translate(x + s / 2, y + s / 2);
     drawTowerArt(type, s, level, t, anim, owner?.color ?? '#888', id === selected, spec);
+    // Trampa de púas: contador de cargas restantes + barra de desgaste bajo la placa.
+    const charges = tw[11] ?? 0;
+    if (type === 'trap' && charges > 0) {
+      const frac = Math.max(0, Math.min(1, charges / 20));
+      // barra de desgaste
+      const bw = s * 0.56;
+      const by = s * 0.28;
+      g.fillStyle = 'rgba(6,8,14,0.7)';
+      roundRect(g, -bw / 2 - 1, by - 1, bw + 2, s * 0.09 + 2, s * 0.045);
+      g.fill();
+      g.fillStyle = frac > 0.5 ? '#cfd8dc' : frac > 0.25 ? '#ffb300' : '#ef5350';
+      roundRect(g, -bw / 2, by, Math.max(2, bw * frac), s * 0.09, s * 0.045);
+      g.fill();
+      // contador numérico
+      g.fillStyle = '#eceff1';
+      g.font = `bold ${Math.max(8, s * 0.24)}px system-ui, sans-serif`;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.strokeStyle = 'rgba(0,0,0,0.7)';
+      g.lineWidth = 3;
+      g.strokeText(String(charges), 0, -s * 0.3);
+      g.fillText(String(charges), 0, -s * 0.3);
+    }
     // ATURDIDA (Zapador / Behemot): estrellitas girando sobre la torre + tinte gris
     const stunned = (tw[10] ?? 0) === 1;
     if (stunned) {
@@ -1604,6 +1650,77 @@ function drawTowerArt(
       g.stroke();
       break;
     }
+    case 'trap': {
+      // placa metálica hundida en el suelo del camino + hilera de púas triangulares.
+      // El desgaste (cargas restantes) lo pinta drawTowers con un contador aparte.
+      g.fillStyle = '#4e342e';
+      roundRect(g, -s * 0.3, -s * 0.18, s * 0.6, s * 0.36, s * 0.05);
+      g.fill();
+      g.fillStyle = '#3a2a24';
+      roundRect(g, -s * 0.26, -s * 0.14, s * 0.52, s * 0.28, s * 0.04);
+      g.fill();
+      // púas metálicas
+      const spikeShine = 0.6 + Math.sin(t * 6) * 0.2;
+      g.fillStyle = `rgba(207,216,220,${spikeShine})`;
+      g.strokeStyle = '#78909c';
+      g.lineWidth = Math.max(1, s * 0.015);
+      for (let row = -1; row <= 1; row++) {
+        for (let col = -2; col <= 2; col++) {
+          const sx = col * s * 0.11;
+          const sy = row * s * 0.11;
+          g.beginPath();
+          g.moveTo(sx - s * 0.035, sy + s * 0.03);
+          g.lineTo(sx, sy - s * 0.06);
+          g.lineTo(sx + s * 0.035, sy + s * 0.03);
+          g.closePath();
+          g.fill();
+          g.stroke();
+        }
+      }
+      break;
+    }
+    case 'alchemist': {
+      // pedestal + matraz burbujeante verde; el anillo de aura lo pinta drawTowers.
+      g.fillStyle = '#37474f';
+      roundRect(g, -s * 0.18, s * 0.02, s * 0.36, s * 0.22, s * 0.05);
+      g.fill();
+      // matraz (cuerpo triangular con cuello)
+      g.fillStyle = 'rgba(200,230,201,0.35)';
+      g.strokeStyle = '#a5d6a7';
+      g.lineWidth = Math.max(1.2, s * 0.03);
+      g.beginPath();
+      g.moveTo(-s * 0.05, -s * 0.24 * grow);
+      g.lineTo(-s * 0.05, -s * 0.08 * grow);
+      g.lineTo(-s * 0.2 * grow, s * 0.08 * grow);
+      g.lineTo(s * 0.2 * grow, s * 0.08 * grow);
+      g.lineTo(s * 0.05, -s * 0.08 * grow);
+      g.lineTo(s * 0.05, -s * 0.24 * grow);
+      g.closePath();
+      g.stroke();
+      // líquido verde
+      g.fillStyle = '#66bb6a';
+      g.beginPath();
+      g.moveTo(-s * 0.16 * grow, s * 0.02 * grow);
+      g.lineTo(s * 0.16 * grow, s * 0.02 * grow);
+      g.lineTo(s * 0.2 * grow, s * 0.08 * grow);
+      g.lineTo(-s * 0.2 * grow, s * 0.08 * grow);
+      g.closePath();
+      g.fill();
+      // burbujas ascendentes
+      for (let i = 0; i < 3; i++) {
+        const ph = (t * (0.8 + i * 0.25) + i * 0.4) % 1;
+        g.fillStyle = `rgba(197,225,165,${0.9 - ph * 0.9})`;
+        g.beginPath();
+        g.arc((i - 1) * s * 0.07, s * 0.05 - ph * s * 0.24, s * (0.03 + 0.015 * (1 - ph)), 0, Math.PI * 2);
+        g.fill();
+      }
+      // destello dorado (oro) sobre el matraz
+      g.fillStyle = `rgba(255,213,79,${0.5 + Math.sin(t * 4) * 0.4})`;
+      g.beginPath();
+      g.arc(s * 0.14, -s * 0.2, s * 0.035, 0, Math.PI * 2);
+      g.fill();
+      break;
+    }
   }
   void def;
 
@@ -1631,6 +1748,7 @@ function drawTowerArt(
   }
   // corona de especialización
   if (specialized) {
+    const rank2 = level >= 4;
     g.fillStyle = '#ffd54f';
     g.strokeStyle = 'rgba(0,0,0,0.4)';
     g.lineWidth = Math.max(1, s * 0.015);
@@ -1647,6 +1765,28 @@ function drawTowerArt(
     g.closePath();
     g.fill();
     g.stroke();
+    // Rango II (nivel 4): gema roja incrustada en la corona + halo palpitante extra
+    if (rank2) {
+      const gemPulse = 0.6 + Math.sin(t * 4) * 0.4;
+      g.fillStyle = `rgba(239,83,80,${0.85})`;
+      g.beginPath();
+      g.moveTo(0, cy - s * 0.02);
+      g.lineTo(s * 0.05, cy + s * 0.03);
+      g.lineTo(0, cy + s * 0.08);
+      g.lineTo(-s * 0.05, cy + s * 0.03);
+      g.closePath();
+      g.fill();
+      g.strokeStyle = `rgba(255,205,210,${gemPulse})`;
+      g.lineWidth = Math.max(1, s * 0.02);
+      g.stroke();
+      // pequeñas gemas laterales para marcar el segundo rango
+      g.fillStyle = `rgba(255,215,120,${gemPulse})`;
+      for (const gx of [-cw / 2 + s * 0.03, cw / 2 - s * 0.03]) {
+        g.beginPath();
+        g.arc(gx, cy + s * 0.02, s * 0.025, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
   }
 }
 
@@ -1911,6 +2051,20 @@ function drawEnemies(interp: InterpResult, now: number): void {
       g.beginPath();
       g.arc(r * 0.3, -r - ph * r * 0.9, Math.max(1.5, r * 0.16 * (1 - ph * 0.5)), 0, Math.PI * 2);
       g.fill();
+    }
+    // SHRED de armadura (Obús/Metralla II): grietas naranjas girando alrededor —
+    // marca que su armadura efectiva está a la mitad.
+    if (e.flags & 32) {
+      const rot = t * 1.6 + e.id;
+      g.strokeStyle = `rgba(255,152,0,${0.6 + Math.sin(t * 8 + e.id) * 0.3})`;
+      g.lineWidth = Math.max(1.2, r * 0.14);
+      for (let i = 0; i < 4; i++) {
+        const a = rot + (i * Math.PI) / 2;
+        g.beginPath();
+        g.moveTo(Math.cos(a) * r * 0.9, Math.sin(a) * r * 0.9);
+        g.lineTo(Math.cos(a + 0.35) * r * 1.25, Math.sin(a + 0.35) * r * 1.25);
+        g.stroke();
+      }
     }
     g.restore();
 
@@ -2709,11 +2863,20 @@ function drawPlacement(gs: GameStore, now: number): void {
     g.lineTo(toX(map.gridW), toY(cy));
     g.stroke();
   }
-  g.fillStyle = 'rgba(129,255,150,0.07)';
+  const type = gs.selection.towerType;
+  // la Trampa se coloca SOBRE el camino; el resto, fuera. Resalta las celdas
+  // construibles según el tipo elegido.
+  const onPathOnly = TOWERS[type].onPathOnly === true;
+  g.fillStyle = onPathOnly ? 'rgba(255,120,120,0.09)' : 'rgba(129,255,150,0.07)';
   for (let cy = 0; cy < map.gridH; cy++) {
     for (let cx = 0; cx < map.gridW; cx++) {
       const key = `${cx},${cy}`;
-      if (ctx.paths.has(key) || ctx.blocked.has(key) || towerSet.has(key)) continue;
+      if (towerSet.has(key)) continue;
+      if (onPathOnly) {
+        if (!ctx.paths.has(key)) continue; // la Trampa solo resalta el camino
+      } else if (ctx.paths.has(key) || ctx.blocked.has(key)) {
+        continue;
+      }
       g.fillRect(toX(cx) + 1, toY(cy) + 1, s - 2, s - 2);
     }
   }
@@ -2722,12 +2885,12 @@ function drawPlacement(gs: GameStore, now: number): void {
   const cell = gs.pendingPlace ?? gs.hoverCell;
   if (!cell) return;
   const { cx, cy } = cell;
-  const type = gs.selection.towerType;
   const lvl = TOWERS[type].levels[0];
   const key = `${cx},${cy}`;
-  const ok =
-    cx >= 0 && cy >= 0 && cx < map.gridW && cy < map.gridH &&
-    !ctx.paths.has(key) && !ctx.blocked.has(key) && !towerSet.has(key);
+  const inGrid = cx >= 0 && cy >= 0 && cx < map.gridW && cy < map.gridH;
+  const ok = inGrid && !towerSet.has(key) && (
+    onPathOnly ? ctx.paths.has(key) : !ctx.paths.has(key) && !ctx.blocked.has(key)
+  );
 
   // rango
   g.fillStyle = ok ? 'rgba(120,220,120,0.08)' : 'rgba(240,80,80,0.08)';

@@ -20,11 +20,14 @@ import {
   ELITE_EXTRA_LIVES,
   ELITE_HP_MULT,
   ELITE_RADIUS_MULT,
+  GROWTH_PER_SHOT,
   HORDE_CAP,
   HORDE_LAP_HP_FLOOR,
   HORDE_LAP_HP_LOSS,
   INTERLUDE_SEC,
   LEAK_WAVE_DIV,
+  SHRED_DURATION,
+  SHRED_RADIUS,
   SPELL_IMMUNE_TESLA_MULT,
   TICK_RATE,
   WAVE_BONUS_BASE,
@@ -96,6 +99,7 @@ function spawnEnemy(
     spellImmune: def.spellImmune ?? false,
     stunTowerId: 0,
     lastWpIdx: at ? at.wpIdx : 1,
+    armorShredUntil: 0,
   };
   state.enemies.push(enemy);
   return enemy;
@@ -150,6 +154,23 @@ function makeBlessed(enemy: EnemyState, affix: AffixId): void {
   applyAffixEffect(enemy, affix);
 }
 
+// Multiplicador de bounty del Alquimista para una posición (la del enemigo al
+// morir). Escanea las torres tipo Alquimista (con `auraBounty`) cuyo radio cubre
+// el punto y toma el MEJOR (+30% base, más en specs) — NO apila. Determinista:
+// orden estable de `state.towers`, sin RNG. 1 = sin Alquimista cerca.
+function bountyMultAt(state: GameState, x: number, y: number): number {
+  let best = 1;
+  for (const t of state.towers) {
+    const lvl = activeStats(t.type, t.level, t.spec);
+    const bonus = lvl.auraBounty;
+    if (bonus === undefined || bonus <= 0) continue;
+    if (dist(t.cx + 0.5, t.cy + 0.5, x, y) > lvl.range) continue;
+    const mult = 1 + bonus;
+    if (mult > best) best = mult;
+  }
+  return best;
+}
+
 function killEnemy(
   state: GameState,
   ctx: SimContext,
@@ -158,7 +179,10 @@ function killEnemy(
   events: GameEvent[],
 ): void {
   const def = ENEMIES[enemy.type];
-  const bounty = Math.round(def.bounty * enemy.bountyMult);
+  // Aura del Alquimista: si la posición donde muere el enemigo está cubierta por
+  // un Alquimista, su bounty gana +30% (o más en spec). No apila.
+  const alchemistMult = bountyMultAt(state, enemy.x, enemy.y);
+  const bounty = Math.round(def.bounty * enemy.bountyMult * alchemistMult);
   const tower = state.towers.find((t) => t.id === killerTowerId);
   let killerName = '';
   if (tower) {
@@ -190,9 +214,19 @@ function killEnemy(
   }
 }
 
+// Armadura efectiva de un enemigo: si tiene shred activo (Obús/Metralla II), su
+// armadura (plana + bonus de afijo) queda a la MITAD durante la duración.
+function effectiveArmor(state: GameState, enemy: EnemyState): number {
+  const base = ENEMIES[enemy.type].armor + enemy.armorBonus;
+  return enemy.armorShredUntil > state.tick ? base * 0.5 : base;
+}
+
 // Aplica daño; devuelve true si el enemigo murió.
 // `execute`: si tras el golpe el enemigo queda por debajo de esta fracción de
-// vida, se remata al instante (0 = desactivado).
+// vida MÁXIMA, se remata al instante (0 = desactivado).
+// `executeCurrent`: Rango II del Cañón de Riel — remata por debajo de esta
+// fracción de la vida ACTUAL (anti-tanque). También es daño de hechizo: no
+// funciona contra inmunes.
 function damageEnemy(
   state: GameState,
   ctx: SimContext,
@@ -202,15 +236,37 @@ function damageEnemy(
   sourceTowerId: number,
   events: GameEvent[],
   execute = 0,
+  executeCurrent = 0,
+  shredChance = 0,
 ): boolean {
   if (enemy.hp <= 0) return false;
-  const def = ENEMIES[enemy.type];
-  const armor = pierceArmor ? 0 : def.armor + enemy.armorBonus;
+  const armor = pierceArmor ? 0 : effectiveArmor(state, enemy);
   const dmg = Math.max(1, amount - armor);
+  const hpBefore = enemy.hp;
   enemy.hp -= dmg;
   // execute es daño de HECHIZO: no remata a los inmunes a magia.
   if (execute > 0 && !enemy.spellImmune && enemy.hp > 0 && enemy.hp < enemy.maxHp * execute) {
-    enemy.hp = 0; // rematado
+    enemy.hp = 0; // rematado (umbral sobre la vida MÁX)
+  }
+  // executeCurrent (Cañón de Riel II): si el golpe hace ≥ 75% de la vida ACTUAL
+  // que tenía el objetivo antes del impacto, lo remata. Anti-tanque; no inmunes.
+  if (executeCurrent > 0 && !enemy.spellImmune && enemy.hp > 0 && dmg >= hpBefore * executeCurrent) {
+    enemy.hp = 0;
+  }
+  // Shred de armadura (Obús/Metralla II): proc por impacto. Con probabilidad
+  // `shredChance` (RNG determinista de la sim), reduce a la mitad la armadura de
+  // los enemigos en radio SHRED_RADIUS alrededor del golpeado durante SHRED_DURATION.
+  if (shredChance > 0 && rand(state) < shredChance) {
+    const until = state.tick + Math.round(SHRED_DURATION * TICK_RATE);
+    const n = state.enemies.length; // longitud fija (no shredear crías nacidas ahora)
+    for (let i = 0; i < n; i++) {
+      const other = state.enemies[i];
+      if (other.hp <= 0) continue;
+      if (dist(enemy.x, enemy.y, other.x, other.y) <= SHRED_RADIUS) {
+        other.armorShredUntil = Math.max(other.armorShredUntil, until);
+      }
+    }
+    events.push({ e: 'shred', x: enemy.x, y: enemy.y, r: SHRED_RADIUS });
   }
   const tower = state.towers.find((t) => t.id === sourceTowerId);
   if (tower) {
@@ -304,6 +360,8 @@ export function computeAuras(state: GameState): Map<number, AuraBuff> {
       const tlvl = activeStats(target.type, target.level, target.spec);
       if (isBanner(tlvl)) continue; // un estandarte no buffea a otro estandarte
       if (tlvl.incomePerWave) continue; // ni a la mina
+      if (tlvl.auraBounty !== undefined) continue; // ni al Alquimista (no dispara)
+      if (TOWERS[target.type].onPathOnly) continue; // ni a la Trampa de púas
       if (dist(bx, by, target.cx + 0.5, target.cy + 0.5) > blvl.range) continue;
       let buff = buffs.get(target.id);
       if (!buff) {
@@ -326,21 +384,31 @@ function fireTower(
 ): void {
   const towerDef = TOWERS[tower.type];
   const lvl = activeStats(tower.type, tower.level, tower.spec);
-  if (lvl.incomePerWave || lvl.slowAura || isBanner(lvl)) return; // la mina, la permafrost y el estandarte no disparan
+  // no disparan: la mina, la Escarcha Eterna, el Estandarte, el Alquimista (aura de
+  // bounty) ni la Trampa de púas (daña por contacto, ver stepTraps).
+  if (lvl.incomePerWave || lvl.slowAura || isBanner(lvl) || lvl.auraBounty !== undefined || towerDef.onPathOnly) return;
 
   const canAir = towerTargetsAir(tower.type, tower.spec);
   const canGround = towerDef.targetsGround;
   const execute = lvl.execute ?? 0;
+  const executeCurrent = lvl.executeCurrent ?? 0;
+  const shredChance = lvl.shredChance ?? 0;
   const shots = Math.max(1, lvl.shots ?? 1);
+
+  const target = pickTarget(state, ctx, tower, lvl, canAir, canGround);
+  if (!target) return;
 
   // refuerzo del/los Estandarte(s) que cubren esta torre (mejor de cada tipo)
   const buff = auras.get(tower.id);
   const dmgMult = buff ? buff.dmgMult : 0;
   const hasteMult = buff ? buff.hasteMult : 0;
-  const dmgFor = (base: number) => Math.round(base * (1 + dmgMult));
-
-  const target = pickTarget(state, ctx, tower, lvl, canAir, canGround);
-  if (!target) return;
+  // Crecimiento permanente (Arco Largo/Explorador II): el bono acumulado se suma al
+  // daño base ANTES del aura. Se captura el bono ACTUAL para este disparo y luego se
+  // incrementa (una vez POR DISPARO, no por objetivo), de modo que el próximo pega más.
+  const growthNow = tower.growthBonus;
+  const dmgFor = (base: number) => Math.round((base + growthNow) * (1 + dmgMult));
+  const growth = lvl.growth ?? 0;
+  if (growth > 0) tower.growthBonus += growth;
 
   const tx = tower.cx + 0.5;
   const ty = tower.cy + 0.5;
@@ -359,7 +427,7 @@ function fireTower(
       pts.push([current.x, current.y]);
       // el rayo Tesla es mágico: los inmunes reciben −70% (execute ya se ignora en damageEnemy)
       const linkDmg = current.spellImmune ? Math.max(1, Math.round(dmg * SPELL_IMMUNE_TESLA_MULT)) : dmg;
-      damageEnemy(state, ctx, current, linkDmg, lvl.pierceArmor ?? false, tower.id, events, execute);
+      damageEnemy(state, ctx, current, linkDmg, lvl.pierceArmor ?? false, tower.id, events, execute, executeCurrent, shredChance);
       dmg = Math.max(1, Math.round(dmg * chain.falloff));
       // buscar el siguiente eslabón cerca del último golpeado
       let next: EnemyState | null = null;
@@ -397,7 +465,7 @@ function fireTower(
     // Francotirador: impacto instantáneo, ignora esquiva
     for (const t of targets) {
       events.push({ e: 'shot', x: tx, y: ty, tx: t.x, ty: t.y, kind: 'snipe', color: towerDef.color });
-      damageEnemy(state, ctx, t, dmgFor(lvl.damage), lvl.pierceArmor ?? false, tower.id, events, execute);
+      damageEnemy(state, ctx, t, dmgFor(lvl.damage), lvl.pierceArmor ?? false, tower.id, events, execute, executeCurrent, shredChance);
     }
     return;
   }
@@ -427,6 +495,8 @@ function fireTower(
       execute,
       color: towerDef.color,
       groundOnly: !canAir,
+      executeCurrent,
+      shredChance,
     };
     state.projectiles.push(proj);
   }
@@ -460,7 +530,7 @@ function applyPayload(
     }
     enemy.poisonUntil = Math.max(enemy.poisonUntil, state.tick + proj.poison.durationTicks);
   }
-  damageEnemy(state, ctx, enemy, proj.damage, proj.pierceArmor, proj.towerId, events, proj.execute);
+  damageEnemy(state, ctx, enemy, proj.damage, proj.pierceArmor, proj.towerId, events, proj.execute, proj.executeCurrent, proj.shredChance);
 }
 
 function explode(
@@ -834,6 +904,43 @@ function stepTowers(state: GameState, ctx: SimContext, events: GameEvent[], aura
   }
 }
 
+// Trampa de púas (F4.2): NO dispara. Cada tick que hay ≥1 enemigo sobre su celda,
+// golpea a TODOS los de la celda (daño FÍSICO, funciona contra inmunes) y consume 1
+// carga. A 0 cargas se auto-elimina (aviso `sys`). Determinista: orden estable de
+// torres y enemigos, sin RNG. Se ejecuta tras el movimiento de enemigos.
+function stepTraps(state: GameState, ctx: SimContext, events: GameEvent[]): void {
+  let removedAny = false;
+  for (const trap of state.towers) {
+    const def = TOWERS[trap.type];
+    if (!def.onPathOnly) continue; // solo las trampas
+    if (trap.charges <= 0) continue;
+    const lvl = activeStats(trap.type, trap.level, trap.spec);
+    // enemigos cuya celda coincide con la de la trampa (longitud fija: las crías que
+    // nazcan por una muerte no reciben este mismo golpe)
+    const n = state.enemies.length;
+    let hitAny = false;
+    for (let i = 0; i < n; i++) {
+      const e = state.enemies[i];
+      if (e.hp <= 0) continue;
+      if (ENEMIES[e.type].flying) continue; // la trampa está en el suelo
+      if (Math.floor(e.x) !== trap.cx || Math.floor(e.y) !== trap.cy) continue;
+      hitAny = true;
+      // daño físico (pierceArmor irrelevante: es daño directo, funciona vs inmunes)
+      damageEnemy(state, ctx, e, lvl.damage, false, trap.id, events, 0, 0, 0);
+    }
+    if (hitAny) {
+      trap.charges -= 1;
+      events.push({ e: 'hit', x: trap.cx + 0.5, y: trap.cy + 0.5, r: 0.4, kind: 'impact' });
+      if (trap.charges <= 0) {
+        removedAny = true;
+        events.push({ e: 'sell', x: trap.cx + 0.5, y: trap.cy + 0.5, refund: 0 });
+        events.push({ e: 'sys', msg: '🪤 Una Trampa de púas se agotó y desapareció.' });
+      }
+    }
+  }
+  if (removedAny) state.towers = state.towers.filter((t) => !(TOWERS[t.type].onPathOnly && t.charges <= 0));
+}
+
 // Auras pasivas (Escarcha Eterna): ralentizan sin disparar a todo lo que rodean.
 function stepTowerAuras(state: GameState): void {
   for (const tower of state.towers) {
@@ -879,6 +986,8 @@ export function stepGame(
   stepWaves(state, ctx, events);
   stepTowerAuras(state);
   stepEnemies(state, ctx, events);
+  // Trampas de púas: golpean a los enemigos que pisan su celda y consumen carga.
+  stepTraps(state, ctx, events);
   // refuerzo de los Estandartes: se calcula una vez por tick (solo lee el estado)
   // y se pasa a las torres para que multipliquen daño/cadencia al disparar.
   const auras = computeAuras(state);

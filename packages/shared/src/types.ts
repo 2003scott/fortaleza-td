@@ -11,7 +11,10 @@ export type TowerTypeId =
   | 'sniper'
   | 'mortar'
   | 'bank'
-  | 'banner';
+  | 'banner'
+  // F4.2 — nuevas torres (al FINAL del orden de snapshot)
+  | 'trap' // Trampa de púas: se coloca SOBRE el camino; daño físico por cargas
+  | 'alchemist'; // Alquimista: aura económica (+bounty por bajas en su radio)
 
 export type EnemyTypeId =
   | 'goblin'
@@ -75,14 +78,32 @@ export interface TowerLevelDef {
   // El radio del aura es el propio `range`. Se toma el MEJOR de cada tipo, no se apilan.
   auraDamage?: number; // +daño a las torres cercanas (fracción)
   auraHaste?: number; // +cadencia a las torres cercanas (fracción; divide el cooldown)
+  // --- F4.2 ---
+  auraBounty?: number; // Alquimista: +bounty (fracción) a bajas dentro del radio (no dispara, no apila)
+  charges?: number; // Trampa de púas: golpes disponibles antes de auto-venderse
+  // Rango II de especialización (nivel 4): mecánica con rol, robada de los procs de
+  // Green TD (ver GREENTD.md §6.2). Se activa mejorando una torre ya especializada.
+  multishotRank2?: boolean; // *Ballesta Repetidora II*: 4 disparos (lo lleva `shots`)
+  executeCurrent?: number; // *Cañón de Riel II*: remata por debajo de esta fracción de la vida ACTUAL (no inmunes)
+  shredChance?: number; // *Obús/Metralla II*: prob. por impacto de reducir a la mitad la armadura en radio 1.5
+  growth?: number; // *Arco Largo/Explorador II*: +daño base permanente por disparo
 }
 
 // Especialización: se elige una de dos al llegar al nivel máximo. Es un bloque
-// de stats completo con identidad propia (nombre, visual y mecánica).
+// de stats completo con identidad propia (nombre, visual y mecánica). Con `rank2`
+// puede mejorarse UNA vez más (nivel 4) pagando `rank2.cost`; los overrides de
+// `rank2` reemplazan a los del Rango I al calcular stats con `level === 4`.
 export interface TowerSpecDef extends TowerLevelDef {
   key: string; // id estable para el render
   name: string;
   desc: string;
+  rank2?: TowerRank2Def; // mejora del Rango II (nivel 4)
+}
+
+// Overrides del Rango II: mismos campos que un nivel de torre, más su coste.
+export interface TowerRank2Def extends Partial<TowerLevelDef> {
+  cost: number;
+  desc?: string; // descripción de la mejora (para el panel)
 }
 
 export interface TowerDef {
@@ -96,6 +117,9 @@ export interface TowerDef {
   projectileKind: 'bullet' | 'shell' | 'bomb' | 'none' | 'beam' | 'snipe';
   levels: [TowerLevelDef, TowerLevelDef, TowerLevelDef];
   specs: [TowerSpecDef, TowerSpecDef]; // ramas A/B al máximo nivel
+  // F4.2 · Trampa de púas: única torre construible SOBRE el camino (y solo ahí).
+  // El resto de torres siguen sin poder ir sobre el camino.
+  onPathOnly?: boolean;
 }
 
 export interface EnemyDef {
@@ -172,6 +196,8 @@ export interface EnemyState {
   spellImmune: boolean; // inmune a magia (slow/veneno/execute; Tesla −70%)
   stunTowerId: number; // Zapador: torre que está aturdiendo (0 = ninguna aún)
   lastWpIdx: number; // Behemot: último waypoint cruzado (para aturdir una vez por esquina)
+  // --- F4.2 ---
+  armorShredUntil: number; // tick hasta el que su armadura efectiva está a la MITAD (shred del Obús/Metralla II). 0 = sin shred
 }
 
 export interface TowerState {
@@ -179,7 +205,7 @@ export interface TowerState {
   type: TowerTypeId;
   cx: number; // celda (entera)
   cy: number;
-  level: number; // 1..3
+  level: number; // 1..3 (4 = Rango II de una especialización)
   spec: number; // -1 sin especializar, 0/1 rama elegida al máximo nivel
   owner: string; // playerId
   cooldownLeft: number; // ticks
@@ -188,6 +214,9 @@ export interface TowerState {
   kills: number;
   damage: number;
   stunnedUntil: number; // tick hasta el que la torre está aturdida (no dispara). 0 = libre
+  // --- F4.2 ---
+  charges: number; // Trampa de púas: golpes restantes; a 0 se auto-vende. Otras torres: 0
+  growthBonus: number; // *Arco Largo/Explorador II*: +daño base acumulado por disparo (crecimiento permanente)
 }
 
 export interface ProjectileState {
@@ -206,9 +235,12 @@ export interface ProjectileState {
   slow?: { factor: number; durationTicks: number };
   poison?: { dps: number; durationTicks: number };
   pierceArmor: boolean;
-  execute: number; // remata por debajo de esta fracción de vida (0 = nunca)
+  execute: number; // remata por debajo de esta fracción de vida MÁX (0 = nunca)
   color: string;
   groundOnly: boolean;
+  // --- F4.2 ---
+  executeCurrent: number; // remata por debajo de esta fracción de la vida ACTUAL (Cañón de Riel II; 0 = nunca)
+  shredChance: number; // prob. de shred de armadura AoE por impacto (Obús/Metralla II; 0 = nunca)
 }
 
 export interface PlayerStats {
@@ -333,6 +365,7 @@ export type GameEvent =
   | { e: 'shot'; x: number; y: number; tx: number; ty: number; kind: 'beam' | 'snipe'; color: string }
   | { e: 'chain'; pts: [number, number][]; color: string }
   | { e: 'hit'; x: number; y: number; r: number; kind: 'splash' | 'impact' | 'poison' | 'frost' }
+  | { e: 'shred'; x: number; y: number; r: number } // proc de shred de armadura (Obús/Metralla II)
   | { e: 'death'; x: number; y: number; type: EnemyTypeId; bounty: number; killer: string; elite: boolean }
   | { e: 'miss'; x: number; y: number }
   | { e: 'leak'; lives: number; type: EnemyTypeId }

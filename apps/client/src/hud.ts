@@ -3,7 +3,9 @@ import {
   CALL_WAVE_GOLD_PER_SEC,
   ENEMIES,
   ENEMY_ORDER,
+  hasRank2,
   HORDE_CAP,
+  rank2Cost,
   SELL_REFUND,
   TARGET_MODES,
   TOWERS,
@@ -79,6 +81,9 @@ function specialStats(lvl: TowerLevelDef): string[] {
   if (lvl.poison) out.push(`Veneno ${lvl.poison.dps}/s`);
   if (lvl.chain) out.push(`Salta a ${lvl.chain.targets}`);
   if (lvl.incomePerWave) out.push(`+🪙${lvl.incomePerWave}/oleada`);
+  if (lvl.auraBounty) out.push(`+${Math.round(lvl.auraBounty * 100)}% oro por baja`);
+  if (lvl.charges) out.push(`${lvl.charges} cargas`);
+  if (lvl.shots && lvl.shots > 1) out.push(`${lvl.shots} disparos`);
   if (lvl.pierceArmor) out.push('Antiarmadura');
   if (lvl.minRange) out.push(`Mín. ${lvl.minRange}`);
   return out;
@@ -95,11 +100,13 @@ function syncPlacingInfo(): void {
   const def = TOWERS[type];
   const lvl = def.levels[0];
   const parts: string[] = [`${TOWER_ICONS[type]} <b>${def.name}</b> 🪙${lvl.cost}`];
-  const isBanner = lvl.auraDamage !== undefined || lvl.auraHaste !== undefined;
-  if (lvl.damage > 0) parts.push(`Daño <b>${lvl.damage}</b>`);
+  const isAura = lvl.auraDamage !== undefined || lvl.auraHaste !== undefined || lvl.auraBounty !== undefined;
+  if (lvl.damage > 0 && !def.onPathOnly) parts.push(`Daño <b>${lvl.damage}</b>`);
+  if (def.onPathOnly) parts.push(`Daño por golpe <b>${lvl.damage}</b>`);
   if (lvl.auraDamage !== undefined && lvl.auraDamage > 0) parts.push(`Aura de daño <b>+${Math.round(lvl.auraDamage * 100)}%</b>`);
   if (lvl.auraHaste !== undefined && lvl.auraHaste > 0) parts.push(`Aura de cadencia <b>+${Math.round(lvl.auraHaste * 100)}%</b>`);
-  if (lvl.range > 0) parts.push(`${isBanner ? 'Radio' : 'Alcance'} <b>${lvl.range}</b>`);
+  if (lvl.auraBounty !== undefined && lvl.auraBounty > 0) parts.push(`Aura de oro <b>+${Math.round(lvl.auraBounty * 100)}%</b>`);
+  if (lvl.range > 0) parts.push(`${isAura ? 'Radio' : 'Alcance'} <b>${lvl.range}</b>`);
   if (lvl.cooldown > 0) parts.push(`Cadencia <b>${lvl.cooldown}s</b>`);
   parts.push(...specialStats(lvl));
   const hint = window.matchMedia('(hover: hover)').matches
@@ -229,10 +236,22 @@ function statBlock(lvl: TowerLevelDef, next: TowerLevelDef | null): string[] {
   if (lvl.slowAura) lines.push(`Aura de hielo <b>${lvl.slowAura.radius}</b> (${Math.round(lvl.slowAura.factor * 100)}%)`);
   if (lvl.poison) lines.push(stat('Veneno', `${lvl.poison.dps}/s`, next?.poison ? `${next.poison.dps}/s` : null));
   if (lvl.chain) lines.push(stat('Salta a', lvl.chain.targets, next?.chain?.targets));
-  if (lvl.execute) lines.push(`Remata por debajo del <b>${Math.round(lvl.execute * 100)}%</b>`);
+  if (lvl.execute) lines.push(`Remata por debajo del <b>${Math.round(lvl.execute * 100)}%</b> de la vida máx`);
+  if (lvl.executeCurrent) lines.push(`Remata por debajo del <b>${Math.round(lvl.executeCurrent * 100)}%</b> de la vida ACTUAL`);
+  if (lvl.shredChance) lines.push(`Shred: <b>${Math.round(lvl.shredChance * 100)}%</b> de partir la armadura en área`);
+  if (lvl.growth) lines.push(`Crecimiento: <b>+${lvl.growth}</b> de daño por disparo`);
+  if (lvl.auraBounty) lines.push(stat('Aura de oro', `+${Math.round(lvl.auraBounty * 100)}%`, next?.auraBounty ? `+${Math.round(next.auraBounty * 100)}%` : null));
   if (lvl.incomePerWave) lines.push(stat('Ingreso', `🪙${lvl.incomePerWave}${lvl.incomeToAll ? ' a todos' : ''}`, next?.incomePerWave ? `🪙${next.incomePerWave}` : null));
   if (lvl.pierceArmor) lines.push('Perfora armadura');
   return lines;
+}
+
+// Botones de modo de objetivo (solo para torres que disparan y tienen alcance).
+function targetModesHtml(def: (typeof TOWERS)[TowerTypeId], lvl: TowerLevelDef, modeIdx: number): string {
+  if (def.projectileKind === 'none' || lvl.range <= 0) return '';
+  return `<div class="tmodes">${TARGET_MODES.map(
+    (m, i) => `<button class="tmode ${i === modeIdx ? 'active' : ''}" data-mode="${m}">${TARGET_LABELS[m]}</button>`,
+  ).join('')}</div>`;
 }
 
 export function refreshPanel(): void {
@@ -251,22 +270,31 @@ export function refreshPanel(): void {
   }
   const [id, typeIdx, , , level, ownerIdx, modeIdx, kills, damage] = data;
   const spec = data[9] ?? -1;
+  const charges = data[11] ?? 0;
   const type = TOWER_ORDER[typeIdx];
   const def = TOWERS[type];
   const specialized = spec >= 0;
+  const isRank2 = level >= 4;
   const lvl = activeStats(type, level, spec);
   const next = !specialized && level < 3 ? def.levels[level] : null;
   const owner = gs.init.players[ownerIdx];
   const isMine = owner?.id === store.playerId;
   const gold = myGold(gs);
   const sellValue = Math.floor(towerTotalCost(type, level, spec) * SELL_REFUND);
-  const canSpecialize = level >= 3 && !specialized;
+  const canSpecialize = level >= 3 && !specialized && !def.onPathOnly;
+  // ¿puede subir al Rango II? torre especializada, aún en nivel 3, cuya spec tenga rank2
+  const canRank2 = specialized && level === 3 && hasRank2(type, spec);
+  const r2cost = canRank2 ? rank2Cost(type, spec) : null;
 
   const statLines = statBlock(lvl, next);
   // Estandarte: cuántas torres está reforzando ahora mismo (contado en el cliente)
   if (lvl.auraDamage !== undefined || lvl.auraHaste !== undefined) {
     const n = countBannerTargets(gs.latest, id);
     statLines.push(`Reforzando <b>${n}</b> ${n === 1 ? 'torre' : 'torres'}`);
+  } else if (def.onPathOnly) {
+    // Trampa de púas: cargas restantes (no acumula kills/daño clásicos)
+    statLines.push(`Cargas: <b>${charges}</b>`);
+    statLines.push(`Bajas: <b>${kills}</b> · Daño total: <b>${damage.toLocaleString()}</b>`);
   } else {
     statLines.push(`Bajas: <b>${kills}</b> · Daño total: <b>${damage.toLocaleString()}</b>`);
   }
@@ -276,12 +304,19 @@ export function refreshPanel(): void {
   const title = specialized
     ? `${TOWER_ICONS[type]} ${def.specs[spec].name}`
     : `${TOWER_ICONS[type]} ${def.name}`;
-  const levelTag = specialized ? '★ Élite' : `Nv. ${level}${level >= 3 ? ' (máx)' : ''}`;
+  const levelTag = isRank2
+    ? '★★ Rango II'
+    : specialized
+      ? '★ Élite'
+      : `Nv. ${level}${level >= 3 ? ' (máx)' : ''}`;
 
   // acciones del dueño
   let actions = '';
   if (isMine) {
-    if (canSpecialize) {
+    if (def.onPathOnly) {
+      // Trampa de púas: no se mejora ni especializa; solo se puede vender.
+      actions = `<div class="prow"><button id="panel-sell" class="btn ghost">💸 Vender ${sellValue}</button></div>`;
+    } else if (canSpecialize) {
       actions = `
         <div class="spec-title">Elige especialización</div>
         <div class="spec-choices">
@@ -297,23 +332,30 @@ export function refreshPanel(): void {
             .join('')}
         </div>
         <div class="prow"><button id="panel-sell" class="btn ghost">💸 Vender ${sellValue}</button></div>`;
-    } else {
-      const nextCost = next?.cost ?? null;
+    } else if (canRank2 && r2cost !== null) {
+      // Rango II: mejora identidad de la especialización (reutiliza el comando upgrade)
+      const r2desc = def.specs[spec].rank2?.desc ?? 'Mejora de Rango II';
       actions = `
+        <div class="spec-title">Rango II</div>
+        <p class="spec-desc" style="padding:0 4px 6px">${escapeHtml(r2desc)}</p>
         <div class="prow">
-          <button id="panel-upgrade" class="btn primary" ${nextCost === null || gold < nextCost ? 'disabled' : ''}>
-            ${nextCost === null ? 'Máximo' : `⬆ Mejorar 🪙${nextCost}`}
+          <button id="panel-upgrade" class="btn primary" ${gold < r2cost ? 'disabled' : ''}>
+            ★★ Rango II 🪙${r2cost}
           </button>
           <button id="panel-sell" class="btn ghost">💸 ${sellValue}</button>
         </div>
-        ${
-          def.projectileKind !== 'none' && lvl.range > 0
-            ? `<div class="tmodes">${TARGET_MODES.map(
-                (m, i) =>
-                  `<button class="tmode ${i === modeIdx ? 'active' : ''}" data-mode="${m}">${TARGET_LABELS[m]}</button>`,
-              ).join('')}</div>`
-            : ''
-        }`;
+        ${targetModesHtml(def, lvl, modeIdx)}`;
+    } else {
+      const nextCost = next?.cost ?? null;
+      const maxedLabel = isRank2 ? 'Máximo (Rango II)' : 'Máximo';
+      actions = `
+        <div class="prow">
+          <button id="panel-upgrade" class="btn primary" ${nextCost === null || gold < nextCost ? 'disabled' : ''}>
+            ${nextCost === null ? maxedLabel : `⬆ Mejorar 🪙${nextCost}`}
+          </button>
+          <button id="panel-sell" class="btn ghost">💸 ${sellValue}</button>
+        </div>
+        ${targetModesHtml(def, lvl, modeIdx)}`;
     }
   } else {
     actions = `<p class="hint">Torre de ${escapeHtml(owner?.name ?? 'otro jugador')}</p>`;

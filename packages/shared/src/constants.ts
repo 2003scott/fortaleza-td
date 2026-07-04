@@ -52,6 +52,18 @@ export const BLESSED_ODDS = 15;
 export const BLESSED_BOUNTY_MULT = 1.5;
 export const BLESSED_BONUS_MULT = 1.5;
 
+// ---------- F4.2 · torres nuevas + Rango II ----------
+// Trampa de púas: cargas iniciales (cada golpe consume 1; a 0 se auto-vende).
+export const TRAP_CHARGES = 20;
+// Alquimista: multiplicador de bounty para las bajas dentro de su radio (no apila).
+export const ALCHEMIST_BOUNTY_MULT = 1.3; // +30%
+// Rango II · Obús/Metralla II: shred de armadura AoE.
+export const SHRED_CHANCE = 0.03; // 3% por impacto
+export const SHRED_RADIUS = 1.5; // celdas alrededor del enemigo golpeado
+export const SHRED_DURATION = 4; // segundos que dura el shred (armadura a la mitad)
+// Rango II · Arco Largo/Explorador II: crecimiento permanente por disparo.
+export const GROWTH_PER_SHOT = 8; // +8 de daño base por cada disparo, para siempre
+
 // oro de entrada para quien se une con la partida ya empezada
 export const midJoinGold = (wave: number) => 180 + wave * 22;
 
@@ -87,5 +99,5 @@ export const PLAYER_COLORS = [
   '#e57373', // rojo
 ];
 
-export const BALANCE_VERSION = 4;
+export const BALANCE_VERSION = 5;
 export const PROTOCOL_VERSION = 1;
