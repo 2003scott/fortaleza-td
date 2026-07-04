@@ -1,5 +1,5 @@
 import './style.css';
-import { ENEMIES, ENEMY_ORDER, GAME_SPEEDS, TOWERS, type GameEvent } from '@td/shared';
+import { ENEMIES, ENEMY_ORDER, FUSIONS, GAME_SPEEDS, TOWERS, type GameEvent } from '@td/shared';
 import { net, wsPathJoin } from './net.js';
 import { pushFrame, saveName, startGameStore, store } from './store.js';
 import { addPing, addShake, initRenderer, isMinimapOn, resetRenderer, toggleMinimap, towerFired } from './renderer.js';
@@ -120,6 +120,19 @@ function processEvents(events: GameEvent[]): void {
         floatText(ev.x, ev.y - 0.6, `★ ${ev.name}`, '#ffd54f', 15);
         sfx.specialize(panOf(ev.x));
         break;
+      case 'fuse': {
+        // F4.3 · fusión: doble anillo (color de la receta + arcano) + estallido
+        const fdef = FUSIONS[ev.fusion];
+        const fcolor = fdef?.color ?? '#ce93d8';
+        ring(ev.x, ev.y, 1.5, fcolor);
+        ring(ev.x, ev.y, 1.0, '#ce93d8');
+        burst(ev.x, ev.y, fcolor, 24, 3.2);
+        addShake(4);
+        floatText(ev.x, ev.y - 0.6, `⚗ ${ev.name}`, fcolor, 16);
+        toast(`⚗ ¡Fusión: ${ev.name}!`, 'info');
+        sfx.specialize(panOf(ev.x));
+        break;
+      }
       case 'sell':
         floatText(ev.x, ev.y, `+🪙${ev.refund}`, '#ffd54f', 13);
         sfx.sell(panOf(ev.x));
