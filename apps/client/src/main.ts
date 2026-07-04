@@ -4,6 +4,7 @@ import { net, wsPathJoin } from './net.js';
 import { pushFrame, saveName, startGameStore, store } from './store.js';
 import { addPing, addShake, initRenderer, isMinimapOn, resetRenderer, toggleMinimap, towerFired } from './renderer.js';
 import { initInput } from './input.js';
+import { initBestiary } from './bestiary.js';
 import { applySpectatorUI, buildTowerBar, hidePanel, onTick, toast, addChat, refreshPanel, syncSpeedButton, syncTowerBar } from './hud.js';
 import { hideEnd, homeError, initHome, initLobby, renderLobby, showEnd, switchScreen } from './screens.js';
 import { beam, burst, clearParticles, floatText, line, ring } from './particles.js';
@@ -135,8 +136,14 @@ function processEvents(events: GameEvent[]): void {
         break;
       }
       case 'sell':
-        floatText(ev.x, ev.y, `+🪙${ev.refund}`, '#ffd54f', 13);
-        sfx.sell(panOf(ev.x));
+        if (ev.refund > 0) {
+          floatText(ev.x, ev.y, `+🪙${ev.refund}`, '#ffd54f', 13);
+          sfx.sell(panOf(ev.x));
+        } else {
+          // objeto sin reembolso (p. ej. una Trampa de púas agotada): poof discreto,
+          // sin texto de oro ni sonido de caja, para no spamear con muchas trampas.
+          burst(ev.x, ev.y, '#b0bec5', 8, 1.8);
+        }
         break;
       case 'reject':
         if (ev.playerId === store.playerId) {
@@ -504,6 +511,7 @@ initRenderer(canvas);
 initInput(canvas);
 initHome();
 initLobby();
+initBestiary();
 wireHudButtons();
 wireNet();
 // el reproductor de repeticiones reusa el MISMO pipeline de eventos que la red
