@@ -100,10 +100,37 @@ async function main(): Promise<void> {
   const chat = await ana.waitFor('chat');
   assert(chat.text === 'hola familia!' && chat.from === 'Beto', 'el chat llega a los demás');
 
-  // 4. Empieza la partida
+  // 3b. Beto marca «Listo» (la partida solo arranca con todos los no-anfitriones listos)
+  ana.send({ type: 'start_game' }); // aún sin listos: debe rechazarse
+  const notReady = await ana.waitFor('error');
+  assert(/listo/i.test(notReady.msg), 'iniciar sin todos listos se rechaza');
+  beto.send({ type: 'set_ready', ready: true });
+  const readyLobby = await ana.waitFor('lobby_state');
+  assert(readyLobby.players.find((p) => !p.isHost)?.ready === true, 'el jugador aparece como «listo»');
+
+  // 3c. Desmarcar «Listo» durante la cuenta atrás la CANCELA (countdown con seconds=0)
   ana.send({ type: 'start_game' });
-  const initA = await ana.waitFor('game_started');
-  const initB = await beto.waitFor('game_started');
+  const cdCancelable = await ana.waitFor('countdown');
+  assert(cdCancelable.seconds === 3, 'la cuenta atrás arranca con 3s');
+  beto.send({ type: 'set_ready', ready: false });
+  const cdCancel = await ana.waitFor('countdown');
+  assert(cdCancel.kind === 'start' && cdCancel.seconds === 0, 'desmarcar «Listo» cancela la cuenta atrás');
+  // consumir el aviso de sistema (deja limpio el buffer de chat para los tests siguientes)
+  const cancelMsg = await ana.waitFor('chat');
+  assert(cancelMsg.from === '' && /cancelado/i.test(cancelMsg.text), 'todos ven el aviso de cancelación');
+  beto.send({ type: 'set_ready', ready: true });
+  // consumir lobby_state hasta VER a Beto listo (el del desmarcado llega antes)
+  for (;;) {
+    const lb = await ana.waitFor('lobby_state');
+    if (lb.players.find((p) => !p.isHost)?.ready === true) break;
+  }
+
+  // 4. Empieza la partida (con cuenta regresiva de 3s antes de arrancar)
+  ana.send({ type: 'start_game' });
+  const cd = await ana.waitFor('countdown');
+  assert(cd.kind === 'start' && cd.seconds === 3, 'el inicio lleva cuenta regresiva de 3s');
+  const initA = await ana.waitFor('game_started', 6000);
+  const initB = await beto.waitFor('game_started', 6000);
   assert(initA.init.players.length === 2, 'la partida arranca con 2 jugadores');
   assert(initA.init.youAre !== initB.init.youAre, 'cada cliente sabe quién es');
 
@@ -237,9 +264,14 @@ async function replayIdentityScenario(): Promise<void> {
   await bob.waitFor('room_joined');
   await host.waitFor('lobby_state');
 
+  // Bob marca «Listo» antes de que el anfitrión pueda iniciar
+  bob.send({ type: 'set_ready', ready: true });
+  await host.waitFor('lobby_state');
+
   host.send({ type: 'start_game' });
-  await host.waitFor('game_started');
-  await bob.waitFor('game_started');
+  await host.waitFor('countdown');
+  await host.waitFor('game_started', 6000);
+  await bob.waitFor('game_started', 6000);
   // x3 para que la partida (y el drenaje de vidas sin defensa) transcurra rápido en
   // tiempo de pared. La velocidad no altera el determinismo: solo mete varios
   // stepGame por tick de red (los comandos van en el primer paso).

@@ -18,6 +18,49 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 // la repetición de la partida que acaba de terminar (para "🎬 Ver repetición")
 let lastReplay: ReplayData | null = null;
 
+// ---------- cuenta regresiva (inicio de partida / reanudación) ----------
+// El servidor manda `countdown` con los segundos; el cliente los muestra en
+// grande N..1. El arranque/reanudación real lo dispara el servidor al llegar a 0
+// (game_started / resumed), que además ocultan el overlay por si hubiera desfase.
+let countdownTimer: ReturnType<typeof setInterval> | null = null;
+
+function hideCountdown(): void {
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+  $('overlay-countdown').hidden = true;
+}
+
+function showCountdown(kind: 'start' | 'resume', seconds: number): void {
+  const overlay = $('overlay-countdown');
+  const num = $('countdown-num');
+  $('countdown-label').textContent = kind === 'start' ? '¡La partida empieza en…!' : '¡Reanudando en…!';
+  // reanudación: el overlay tapa el botón de pausa, así que ofrece cancelar aquí
+  // mismo (manda `pause`, que en el servidor aborta la reanudación en curso)
+  $('countdown-cancel').hidden = kind !== 'resume' || store.spectator;
+  overlay.hidden = false;
+  let n = Math.max(1, Math.round(seconds));
+  const tick = () => {
+    num.textContent = String(n);
+    // reinicia la animación de "pop" en cada número
+    num.classList.remove('pop');
+    void num.offsetWidth;
+    num.classList.add('pop');
+    sfx.ping(0);
+  };
+  tick();
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    n -= 1;
+    if (n <= 0) {
+      hideCountdown();
+      return;
+    }
+    tick();
+  }, 1000);
+}
+
 // ---------- procesado de eventos de la simulación ----------
 
 function processEvents(events: GameEvent[]): void {
@@ -262,7 +305,20 @@ function wireNet(): void {
     $('btn-resume').hidden = store.spectator;
   });
 
+  // cuenta regresiva de inicio ('start', en el lobby) o de reanudación ('resume',
+  // sobre la pausa). unlockAudio para que suene el tic aunque no se haya tocado nada.
+  // seconds=0 = el servidor la canceló (alguien desmarcó «Listo», entró alguien…).
+  net.on('countdown', (msg) => {
+    if (msg.seconds <= 0) {
+      hideCountdown();
+      return;
+    }
+    unlockAudio();
+    showCountdown(msg.kind, msg.seconds);
+  });
+
   net.on('game_started', (msg) => {
+    hideCountdown();
     store.playerId = msg.init.youAre;
 
     // Si ya estamos jugando esta partida, el mensaje es solo la lista de
@@ -349,6 +405,8 @@ function wireNet(): void {
 
   net.on('paused', (msg) => {
     if (store.game) store.game.paused = true;
+    // una pausa cancela cualquier cuenta regresiva de reanudación en curso
+    hideCountdown();
     $('pause-by').textContent = msg.by ? `${msg.by} pausó la partida` : 'La partida está en pausa';
     // cualquier jugador puede reanudar (los espectadores no)
     $('btn-resume').hidden = store.spectator;
@@ -356,14 +414,26 @@ function wireNet(): void {
     $('btn-pause').textContent = '▶';
     // .paused sube el chat POR ENCIMA del velo de pausa: se puede hablar en pausa
     $('screen-game').classList.add('paused');
+    // en pausa el input del chat SIEMPRE está visible y disponible (los
+    // espectadores usan su propio flujo; aquí es para los jugadores)
+    if (!store.spectator) {
+      $('game-chat-form').hidden = false;
+      $('hud-chat').classList.add('open');
+    }
     pauseMusic(); // la música se atenúa/detiene en pausa
   });
 
   net.on('resumed', () => {
     if (store.game) store.game.paused = false;
+    hideCountdown();
     $('overlay-pause').hidden = true;
     $('btn-pause').textContent = '⏸';
     $('screen-game').classList.remove('paused');
+    // al reanudar, recoge el chat (salvo que el jugador esté escribiendo ahora)
+    if (document.activeElement !== $('game-chat-input')) {
+      $('game-chat-form').hidden = true;
+      $('hud-chat').classList.remove('open');
+    }
     resumeMusic();
   });
 
@@ -403,18 +473,23 @@ function wireNet(): void {
     $('overlay-reconnect').hidden = true;
   };
 
-  // la sala se cerró por inactividad (código 4001): volver a la portada limpio,
-  // SIN reintentos de conexión
-  net.onKicked = () => {
+  // cierre deliberado del servidor: volver a la portada limpio, SIN reintentos.
+  // 4002 = expulsado por el anfitrión; 4001 = sala cerrada por inactividad.
+  net.onKicked = (code) => {
     store.roomCode = '';
     store.game = null;
     stopMusic();
+    hideCountdown();
     $('overlay-reconnect').hidden = true;
     $('overlay-pause').hidden = true;
     $('screen-game').classList.remove('paused');
     history.replaceState(null, '', location.pathname);
     switchScreen('home');
-    homeError('⏰ La sala se cerró por inactividad (30 min sin actividad). Crea otra cuando quieran — es un toque.');
+    homeError(
+      code === 4002
+        ? '🚪 Fue expulsado por el anfitrión.'
+        : '⏰ La sala se cerró por inactividad (30 min sin actividad). Crea otra cuando quieran — es un toque.',
+    );
   };
 
   net.onDrop = () => {
@@ -434,6 +509,9 @@ function wireHudButtons(): void {
     else net.send({ type: 'pause' });
   });
   $('btn-resume').addEventListener('click', () => net.send({ type: 'resume' }));
+  // cancela la cuenta atrás de reanudación desde el propio overlay (que tapa el
+  // resto de botones): `pause` aborta la reanudación y nos deja en pausa firme
+  $('countdown-cancel').addEventListener('click', () => net.send({ type: 'pause' }));
 
   // velocidad de juego: el anfitrión cicla x1 → x2 → x3
   $('btn-speed').addEventListener('click', () => {
@@ -532,12 +610,15 @@ function wireHudButtons(): void {
     startReplay(lastReplay);
   });
 
-  // chat dentro del juego; en móvil la clase .open muestra también el log
+  // chat dentro del juego; en móvil la clase .open muestra también el log.
+  // En PAUSA el input nunca se esconde: siempre queda visible y disponible.
   const chatForm = $('game-chat-form');
   const chatInput = $<HTMLInputElement>('game-chat-input');
+  const isPaused = () => store.game?.paused === true && !store.spectator;
   const syncChatOpen = () => $('hud-chat').classList.toggle('open', !chatForm.hidden);
   $('btn-chat-toggle').addEventListener('click', () => {
-    chatForm.hidden = !chatForm.hidden;
+    // en pausa el botón solo puede ABRIR el chat (no cerrarlo)
+    chatForm.hidden = isPaused() ? false : !chatForm.hidden;
     syncChatOpen();
     if (!chatForm.hidden) chatInput.focus();
   });
@@ -546,9 +627,9 @@ function wireHudButtons(): void {
     const text = chatInput.value.trim();
     if (text) net.send({ type: 'chat', text });
     chatInput.value = '';
-    chatInput.blur();
-    chatForm.hidden = true;
-    syncChatOpen();
+    // mantener el formulario abierto con el input enfocado para escribir el siguiente mensaje
+    // (tanto en juego normal como en pausa)
+    chatInput.focus();
   });
   window.addEventListener('keydown', (e) => {
     if (store.screen !== 'game') return;
@@ -561,8 +642,11 @@ function wireHudButtons(): void {
     }
     if (e.key === 'Escape' && active === chatInput) {
       chatInput.blur();
-      chatForm.hidden = true;
-      syncChatOpen();
+      // en pausa el input permanece visible (solo se pierde el foco)
+      if (!isPaused()) {
+        chatForm.hidden = true;
+        syncChatOpen();
+      }
     }
   });
 

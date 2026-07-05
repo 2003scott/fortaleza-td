@@ -5,6 +5,7 @@ import { roomPrevToken, saveName, store } from './store.js';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const DIFF_LABELS: Record<string, string> = { easy: 'Fácil', normal: 'Normal', hard: 'Difícil' };
+const DIFF_EMOJI: Record<string, string> = { easy: '😊', normal: '🙂', hard: '😈' };
 const MODE_LABELS: Record<string, string> = { classic: 'Clásico', endless: 'Infinito', horde: 'Horda 🌀' };
 
 // colores de las miniaturas por tema (versión compacta de las paletas del renderer)
@@ -131,9 +132,14 @@ function setSeg(id: string, value: string, disabled = false): void {
 
 // ---------- inicio ----------
 
-// Ajustes POR DEFECTO de una sala nueva: la portada ya no elige nada (mapa,
-// modo, dificultad y visibilidad se cambian DENTRO de la sala, en el lobby).
-const homeSel: RoomSettings = { mapId: MAPS[0].id, mode: 'classic', difficulty: 'normal', public: false };
+// Ajustes POR DEFECTO de una sala nueva: mapa, modo y dificultad se cambian
+// DENTRO de la sala (lobby); la VISIBILIDAD, en cambio, se decide en la portada.
+const homeSel: RoomSettings = { mapId: MAPS[0].id, mode: 'classic', difficulty: 'normal' };
+
+// Visibilidad elegida en la portada: SIN valor por defecto a propósito — crear
+// la sala exige decidir consciente si será 🔒 privada o 🌐 pública. El botón
+// «Crear sala» queda deshabilitado (con hint del porqué) hasta que se elige.
+let homeVisibility: 'private' | 'public' | null = null;
 
 export function initHome(): void {
   const nameInput = $<HTMLInputElement>('home-name');
@@ -164,11 +170,42 @@ export function initHome(): void {
     return name;
   };
 
-  $('btn-create').addEventListener('click', () => {
+  // habilita «Crear sala» solo con nombre + visibilidad, y explica qué falta
+  const createBtn = $<HTMLButtonElement>('btn-create');
+  const createHint = $('create-hint');
+  const updateCreateState = (): void => {
+    const hasName = nameInput.value.trim().length > 0;
+    const hasVis = homeVisibility !== null;
+    createBtn.disabled = !hasName || !hasVis;
+    createHint.classList.toggle('blocked', !hasName || !hasVis);
+    createHint.textContent =
+      !hasName && !hasVis
+        ? 'Ponte un nombre y elige la visibilidad para crear la sala.'
+        : !hasName
+          ? 'Ponte un nombre para crear la sala 🙂'
+          : !hasVis
+            ? 'Elige si la sala será 🔒 privada o 🌐 pública.'
+            : 'El mapa, el modo y la dificultad se eligen dentro, con tu equipo ya en la sala.';
+  };
+  wireSeg('home-visibility', (v) => {
+    homeVisibility = v as 'private' | 'public';
+    setSeg('home-visibility', v);
+    updateCreateState();
+  });
+  nameInput.addEventListener('input', updateCreateState);
+  updateCreateState();
+
+  createBtn.addEventListener('click', () => {
     const name = requireName();
-    if (!name) return;
-    // conecta a una sala nueva (el backend asigna un código libre) y crea al abrir
-    net.connect(wsPathCreate(), { type: 'create_room', name, token: store.token, settings: { ...homeSel } });
+    if (!name || homeVisibility === null) return;
+    // conecta a una sala nueva (el backend asigna un código libre) y crea al abrir;
+    // la visibilidad elegida viaja en los settings del create_room
+    net.connect(wsPathCreate(), {
+      type: 'create_room',
+      name,
+      token: store.token,
+      settings: { ...homeSel, public: homeVisibility === 'public' },
+    });
   });
 
   $('btn-join').addEventListener('click', () => joinFromInput());
@@ -241,22 +278,37 @@ async function loadRooms(): Promise<void> {
 
 function renderRooms(rooms: PublicRoomInfo[]): void {
   $('home-rooms-empty').hidden = rooms.length > 0;
-  $('home-rooms-list').innerHTML = rooms
+  const list = $('home-rooms-list');
+  list.innerHTML = rooms
     .slice(0, 12)
     .map((r) => {
-      const mapName = MAPS.find((m) => m.id === r.mapId)?.name ?? r.mapId;
+      const map = MAPS.find((m) => m.id === r.mapId);
+      const mapName = map?.name ?? r.mapId;
       const state = r.inGame
         ? `<span class="room-state ingame">⚔️ Oleada ${r.wave}</span>`
         : '<span class="room-state lobby">🟢 En el lobby</span>';
+      // fila escaneable: miniatura del mapa + anfitrión/estado arriba y las
+      // etiquetas (mapa · modo · dificultad · jugadores) debajo
       return `<li class="room-row">
+        <canvas class="room-thumb"${map ? ` data-map="${map.id}"` : ''} aria-hidden="true"></canvas>
         <div class="room-info">
-          ${state}
-          <span class="room-meta"><b>${escapeHtml(r.host)}</b> · ${mapName} · ${MODE_LABELS[r.mode]} · ${DIFF_LABELS[r.difficulty]} · 👥 ${r.players}</span>
+          <div class="room-top"><b class="room-host">${escapeHtml(r.host)}</b>${state}</div>
+          <div class="room-tags">
+            <span class="room-tag">🗺 ${escapeHtml(mapName)}</span>
+            <span class="room-tag">${MODE_LABELS[r.mode] ?? escapeHtml(r.mode)}</span>
+            <span class="room-tag">${DIFF_EMOJI[r.difficulty] ?? ''} ${DIFF_LABELS[r.difficulty] ?? escapeHtml(r.difficulty)}</span>
+            <span class="room-tag">👥 ${r.players}</span>
+          </div>
         </div>
-        <button class="btn small ${r.inGame ? 'ghost' : 'primary'}" data-code="${r.code}">${r.inGame ? '👁 Observar' : '⚔️ Entrar'}</button>
+        <button class="btn small ${r.inGame ? 'ghost' : 'primary'}" data-code="${r.code}">${r.inGame ? '👁 Mirar' : '⚔️ Entrar'}</button>
       </li>`;
     })
     .join('');
+  // las miniaturas se pintan tras el innerHTML (canvas no serializa contenido)
+  for (const canvas of list.querySelectorAll<HTMLCanvasElement>('canvas[data-map]')) {
+    const map = MAPS.find((m) => m.id === canvas.dataset.map);
+    if (map) drawMiniMap(canvas, map);
+  }
 }
 
 async function loadHighscores(): Promise<void> {
@@ -294,6 +346,28 @@ export function initLobby(): void {
   wireSeg('lobby-visibility', (v) => sendSettings({ public: v === 'public' }));
 
   $('btn-start').addEventListener('click', () => net.send({ type: 'start_game' }));
+
+  // botón «Listo» (jugadores no-anfitrión): alterna el estado propio
+  $('btn-ready').addEventListener('click', () => {
+    const me = store.lobby.players.find((p) => p.id === store.playerId);
+    net.send({ type: 'set_ready', ready: !(me?.ready ?? false) });
+  });
+
+  // expulsar / ceder anfitrión (solo anfitrión): delegación en la lista de jugadores
+  $('lobby-players').addEventListener('click', (e) => {
+    const kickBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-kick]');
+    if (kickBtn && store.isHost) {
+      net.send({ type: 'kick_player', playerId: kickBtn.dataset.kick! });
+      return;
+    }
+    const cedeBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-cede]');
+    if (cedeBtn && store.isHost) {
+      const name = cedeBtn.title.replace('Ceder anfitrión a ', '');
+      if (confirm(`¿Ceder la sala a ${name}? Ya no podrás iniciar la partida ni cambiar los ajustes.`))
+        net.send({ type: 'transfer_host', playerId: cedeBtn.dataset.cede! });
+    }
+  });
+
   $('btn-leave').addEventListener('click', () => {
     net.disconnect(); // cierra el socket: el servidor nos saca de la sala
     store.roomCode = '';
@@ -327,14 +401,31 @@ export function renderLobby(): void {
   $('lobby-code').textContent = store.roomCode;
 
   $('lobby-players').innerHTML = players
-    .map(
-      (p) => `
+    .map((p) => {
+      const isMe = p.id === store.playerId;
+      // insignia de estado: el anfitrión no necesita marcar «Listo»; el resto sí
+      const badge = p.isHost
+        ? '<span class="host-tag">👑 anfitrión</span>'
+        : p.ready
+          ? '<span class="ready-tag on">✅ listo</span>'
+          : '<span class="ready-tag off">⏳ esperando</span>';
+      // el anfitrión puede ceder la sala a otro jugador CONECTADO, y expulsar a
+      // cualquiera, incluso desconectado (limpia los huecos fantasma del lobby)
+      const cede = store.isHost && !isMe && p.connected
+        ? `<button class="cede-btn" data-cede="${p.id}" title="Ceder anfitrión a ${escapeHtml(p.name)}" aria-label="Ceder anfitrión">👑</button>`
+        : '';
+      const kick = store.isHost && !isMe
+        ? `<button class="kick-btn" data-kick="${p.id}" title="Expulsar a ${escapeHtml(p.name)}" aria-label="Expulsar">✕</button>`
+        : '';
+      return `
       <li class="${p.connected ? '' : 'offline'}">
         <span class="player-dot" style="background:${p.color};color:${p.color}"></span>
-        <span>${escapeHtml(p.name)}${p.id === store.playerId ? ' (tú)' : ''}</span>
-        ${p.isHost ? '<span class="host-tag">👑 anfitrión</span>' : ''}
-      </li>`,
-    )
+        <span class="player-name">${escapeHtml(p.name)}${isMe ? ' (tú)' : ''}</span>
+        ${badge}
+        ${cede}
+        ${kick}
+      </li>`;
+    })
     .join('');
 
   renderMapCards('lobby-maps', settings.mapId, !store.isHost, (id) => sendSettings({ mapId: id }));
@@ -342,8 +433,32 @@ export function renderLobby(): void {
   setSeg('lobby-mode', settings.mode, !store.isHost);
   setSeg('lobby-diff', settings.difficulty, !store.isHost);
   setSeg('lobby-visibility', settings.public ? 'public' : 'private', !store.isHost);
-  $('btn-start').hidden = !store.isHost;
+
+  // estado de «Listo» del equipo (solo cuentan los no-anfitriones conectados)
+  const others = players.filter((p) => p.connected && !p.isHost);
+  const readyCount = others.filter((p) => p.ready).length;
+  const allReady = others.every((p) => p.ready);
+  const me = players.find((p) => p.id === store.playerId);
+
+  const startBtn = $<HTMLButtonElement>('btn-start');
+  const readyBtn = $<HTMLButtonElement>('btn-ready');
+  const status = $('lobby-ready-status');
+
+  startBtn.hidden = !store.isHost;
+  readyBtn.hidden = store.isHost;
   $('lobby-wait').hidden = store.isHost;
+
+  if (store.isHost) {
+    startBtn.disabled = !allReady;
+    startBtn.textContent = allReady ? '▶ ¡Empezar partida!' : '⏳ Esperando a que todos estén listos…';
+    status.hidden = others.length === 0;
+    status.textContent = others.length > 0 ? `${readyCount}/${others.length} jugadores listos` : '';
+  } else {
+    const iAmReady = me?.ready ?? false;
+    readyBtn.classList.toggle('active', iAmReady);
+    readyBtn.textContent = iAmReady ? '⏳ Cancelar «Listo»' : '✅ Estoy listo';
+    status.hidden = true;
+  }
 }
 
 // ---------- fin de partida ----------
