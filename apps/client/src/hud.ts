@@ -36,6 +36,7 @@ import { net } from './net.js';
 import { myGold, myWood, store, type GameStore, type Premove } from './store.js';
 import { computeBannerAuras, countBannerTargets, ENEMY_ICONS, getPlacementCtx, TOWER_ICONS, type ClientAura } from './renderer.js';
 import { clearSelection, setPlacing } from './input.js';
+import { keyLabel } from './keymap.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -212,7 +213,7 @@ export function buildTowerBar(): void {
     card.dataset.type = type;
     card.title = `${def.name} — ${def.desc}`;
     card.innerHTML = `
-      <span class="thk">${def.hotkey}</span>
+      <span class="thk">${keyLabel(`tower:${type}`)}</span>
       <img class="tsprite" alt="" src="/sprites/tower_${type}_l1.png" />
       <span class="ticon">${TOWER_ICONS[type]}</span>
       <span class="tname">${def.name}</span>
@@ -244,6 +245,18 @@ export function buildTowerBar(): void {
     });
     bar.appendChild(card);
   }
+}
+
+// Refresca en caliente las teclas visibles cuando el jugador remapea un atajo
+// desde la Guía: el badge `.thk` de cada tarjeta de torre y (si hay panel abierto)
+// los khints [stop]/[focus]. El mercado se rehace solo en el próximo tick.
+export function syncHotkeyLabels(): void {
+  for (const card of document.querySelectorAll<HTMLElement>('.tcard')) {
+    const type = card.dataset.type as TowerTypeId;
+    const thk = card.querySelector<HTMLElement>('.thk');
+    if (thk) thk.textContent = keyLabel(`tower:${type}`);
+  }
+  refreshPanel();
 }
 
 // resumen de las propiedades especiales de un nivel de torre
@@ -993,8 +1006,8 @@ function buildTowerPanel(gs: GameStore, selectedId: number): { html: string; liv
     const armed = gs.focusArmed;
     controlRow = `
       <div class="prow">
-        <button id="panel-halt" class="btn ghost">${halted ? '▶ Reanudar <span class="khint">[X]</span>' : '⏹ Detener <span class="khint">[X]</span>'}</button>
-        <button id="panel-focus" class="btn ghost${armed ? ' armed' : ''}">${armed ? '🎯 Toca un enemigo…' : '🎯 Objetivo <span class="khint">[F]</span>'}</button>
+        <button id="panel-halt" class="btn ghost">${halted ? `▶ Reanudar <span class="khint">[${keyLabel('stop')}]</span>` : `⏹ Detener <span class="khint">[${keyLabel('stop')}]</span>`}</button>
+        <button id="panel-focus" class="btn ghost${armed ? ' armed' : ''}">${armed ? '🎯 Toca un enemigo…' : `🎯 Objetivo <span class="khint">[${keyLabel('focus')}]</span>`}</button>
       </div>${focusLine}`;
   }
 
@@ -1252,9 +1265,9 @@ function syncMarket(snap: Snap): void {
   const gain = Math.floor(price * WOOD_SELL_SPREAD * WOOD_LOT);
   const buy = $<HTMLButtonElement>('market-buy');
   const sell = $<HTMLButtonElement>('market-sell');
-  // el atajo va en el propio botón (C/V): es donde el jugador mira al operar
-  setText(buy, `[C] Comprar ${WOOD_LOT} 🪵 — 🪙${cost}`);
-  setText(sell, `[V] Vender ${WOOD_LOT} 🪵 — +🪙${gain}`);
+  // el atajo va en el propio botón: es donde el jugador mira al operar (keymap)
+  setText(buy, `[${keyLabel('market_buy')}] Comprar ${WOOD_LOT} 🪵 — 🪙${cost}`);
+  setText(sell, `[${keyLabel('market_sell')}] Vender ${WOOD_LOT} 🪵 — +🪙${gain}`);
   buy.disabled = myGold(gs) < cost;
   sell.disabled = myWood(gs) < WOOD_LOT;
 

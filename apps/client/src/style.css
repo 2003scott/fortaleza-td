@@ -1226,11 +1226,61 @@ html, body {
 .fusion-recipe .fplus { color: var(--fg-dim); font-weight: 800; }
 .fusion-recipe .fresult { font-size: 1rem; }
 
+/* ---------- guía: pestaña Atajos (teclas editables) ---------- */
+.key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.shortcut-msg { font-size: 0.82rem; color: var(--fg-dim); min-height: 1.1em; }
+.key-group { margin-top: 16px; }
+.key-group-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--accent-hi);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(44, 56, 84, 0.5);
+}
+.key-row:last-child { border-bottom: none; }
+.key-name { font-size: 0.86rem; color: var(--fg); }
+.key-row.info .key-name { color: var(--fg-dim); min-width: 42%; }
+.key-static { font-size: 0.78rem; color: var(--fg-dim); text-align: right; }
+.key-btn {
+  min-width: 2.6rem;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+  font-weight: 800;
+  font-family: inherit;
+  color: var(--fg);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-bottom-width: 3px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.05s ease, border-color 0.1s ease;
+}
+.key-btn:hover { border-color: var(--accent2); }
+.key-btn:active { transform: translateY(1px); border-bottom-width: 1px; }
+.key-btn.capturing {
+  color: var(--accent-hi);
+  border-color: var(--accent);
+  background: rgba(255, 179, 0, 0.14);
+  min-width: 9.5rem;
+}
+
 @media (max-width: 700px) {
   .overlay-card.bestiary-card { padding: 18px 14px; }
   .bestiary-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
   .enemy-card { padding: 8px 10px; }
   .guide-tabs .tab { font-size: 0.76rem; padding: 8px 4px; }
+  .guide-tabs { flex-wrap: wrap; }
+  .key-static { max-width: 52%; }
 }
 
 /* podio de fin de partida */

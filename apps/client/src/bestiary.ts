@@ -11,10 +11,21 @@ import {
   ENEMIES,
   FUSION_ORDER,
   FUSIONS,
+  TOWER_ORDER,
   TOWERS,
 } from '@td/shared';
 import type { EnemyDef, EnemyTypeId } from '@td/shared';
 import { ENEMY_ICONS, TOWER_ICONS } from './renderer.js';
+import {
+  CONTROL_ACTIONS,
+  keyLabel,
+  MARKET_ACTIONS,
+  resetKeys,
+  setKey,
+  towerTypeForAction,
+  type KeymapAction,
+} from './keymap.js';
+import { syncHotkeyLabels } from './hud.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -203,6 +214,137 @@ function buildFusions(): void {
     <div class="fusion-list">${cards}</div>`;
 }
 
+// ---------- pestaña 4: atajos de teclado editables ----------
+// Cada acción remapeable muestra su tecla como BOTÓN; al pulsarlo se captura el
+// siguiente keydown (Escape cancela). La anticolisión y la persistencia viven en
+// keymap.ts; aquí solo va la UI y el feedback.
+
+// texto estático de la app, pero escapamos por norma antes de innerHTML
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+// ¿el dispositivo tiene teclado físico? (el atajo global «?» solo tiene sentido ahí)
+const desktopKeyboard = (): boolean =>
+  window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+// filas informativas (gestos/sistema): NO editables
+const INFO_ROWS: [string, string, string][] = [
+  ['👆', 'Doble clic / doble toque', 'Selecciona el GRUPO de torres idénticas (o reencuadra la cámara)'],
+  ['⇧', 'Shift + clic', 'Coloca varias torres del mismo tipo seguidas'],
+  ['⎇', 'Alt + clic', 'Lanza un ping cooperativo en el punto del mapa'],
+  ['⏎', 'Enter', 'Abre / envía el chat del equipo'],
+  ['⎋', 'Escape', 'Cancela el modo actual (focus, colocación…) o cierra el panel'],
+];
+
+// una fila editable: nombre de la acción + botón con su tecla actual
+function keyRow(id: KeymapAction, icon: string, label: string): string {
+  return `<div class="key-row">
+    <span class="key-name">${icon} ${escapeHtml(label)}</span>
+    <button class="key-btn" type="button" data-remap="${id}" aria-label="Reasignar ${escapeHtml(label)}">${keyLabel(id)}</button>
+  </div>`;
+}
+
+function shortcutsHtml(): string {
+  const towerRows = TOWER_ORDER.map((t) => keyRow(`tower:${t}`, TOWER_ICONS[t], TOWERS[t].name)).join('');
+  const controlRows = CONTROL_ACTIONS.map((a) => keyRow(a.id, a.icon, a.label)).join('');
+  const marketRows = MARKET_ACTIONS.map((a) => keyRow(a.id, a.icon, a.label)).join('');
+  const infoRows = INFO_ROWS.map(
+    ([icon, name, desc]) =>
+      `<div class="key-row info"><span class="key-name">${icon} ${escapeHtml(name)}</span><span class="key-static">${escapeHtml(desc)}</span></div>`,
+  ).join('');
+  return `
+    <div class="guide-intro">
+      <h3>⌨️ Atajos de teclado</h3>
+      <p class="edesc">Pulsa la tecla de cualquier acción para <b>reasignarla</b>: entra en modo
+      «pulsa una tecla…» y captura la siguiente que aprietes (Escape cancela). Solo se admiten teclas
+      <b>a–z</b> y <b>0–9</b>; Enter, Escape, Shift, Alt, Ctrl, espacio y flechas están <b>reservadas</b>.
+      Si la tecla ya está en uso, se avisa y no se pisa nada. Los atajos aplican al <b>teclado</b> —
+      en móvil se juega con gestos (ver la sección General).</p>
+      <div class="key-actions">
+        <button class="btn ghost small" type="button" data-reset>↩ Restaurar por defecto</button>
+        <span id="shortcut-msg" class="shortcut-msg" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+    <div class="key-group"><div class="key-group-title">🏰 Torres</div>${towerRows}</div>
+    <div class="key-group"><div class="key-group-title">🎮 Control de torres</div>${controlRows}</div>
+    <div class="key-group"><div class="key-group-title">🛒 Mercado</div>${marketRows}</div>
+    <div class="key-group"><div class="key-group-title">🧭 General — gestos y sistema (no editables)</div>${infoRows}</div>`;
+}
+
+function renderShortcuts(): void {
+  $('guide-shortcuts').innerHTML = shortcutsHtml();
+}
+
+function setMsg(text: string): void {
+  const el = document.getElementById('shortcut-msg');
+  if (el) el.textContent = text;
+}
+
+// nombre legible de una acción (icono + etiqueta) para los avisos
+function actionDisplay(a: KeymapAction): string {
+  const t = towerTypeForAction(a);
+  if (t) return `${TOWER_ICONS[t]} ${TOWERS[t].name}`;
+  const meta = [...CONTROL_ACTIONS, ...MARKET_ACTIONS].find((m) => m.id === a);
+  return meta ? `${meta.icon} ${meta.label}` : a;
+}
+
+// ---- captura de una tecla nueva ----
+let capturing: KeymapAction | null = null;
+let captureBtn: HTMLElement | null = null;
+
+function endCapture(): void {
+  if (captureBtn && capturing) {
+    captureBtn.classList.remove('capturing');
+    captureBtn.textContent = keyLabel(capturing);
+  }
+  document.removeEventListener('keydown', onCaptureKey, true);
+  capturing = null;
+  captureBtn = null;
+}
+
+function onCaptureKey(e: KeyboardEvent): void {
+  if (!capturing) return;
+  // un modificador suelto no cuenta: esperamos a la tecla real
+  if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
+  // capturamos en fase de captura y cortamos la propagación: ni cierra el overlay
+  // (Escape) ni dispara input de juego detrás.
+  e.preventDefault();
+  e.stopPropagation();
+  const action = capturing;
+  endCapture();
+  if (e.key === 'Escape') {
+    setMsg('Reasignación cancelada.');
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) {
+    setMsg('❌ Las combinaciones con Ctrl/Alt/⌘ están reservadas.');
+    return;
+  }
+  const k = e.key.length === 1 ? e.key.toLowerCase() : '';
+  const res = setKey(action, k);
+  if (res.ok) {
+    renderShortcuts();
+    syncHotkeyLabels();
+    setMsg(`✅ ${actionDisplay(action)} → «${k.toUpperCase()}»`);
+  } else if ('conflict' in res) {
+    setMsg(`❌ «${k.toUpperCase()}» ya la usa ${actionDisplay(res.conflict)}`);
+  } else {
+    const shown = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    setMsg(`❌ «${shown}» está reservada — usa una tecla a–z / 0–9.`);
+  }
+}
+
+function startCapture(action: KeymapAction, btn: HTMLElement): void {
+  if (capturing) endCapture(); // solo una reasignación a la vez
+  capturing = action;
+  captureBtn = btn;
+  btn.classList.add('capturing');
+  btn.textContent = 'pulsa una tecla…';
+  setMsg(`Pulsa la tecla nueva para ${actionDisplay(action)} (Escape cancela).`);
+  document.addEventListener('keydown', onCaptureKey, true);
+}
+
 // ---------- construcción + pestañas ----------
 
 let built = false;
@@ -212,12 +354,14 @@ function build(): void {
   buildEnemies();
   buildElites();
   buildFusions();
+  renderShortcuts();
 }
 
 const TABS: [string, string][] = [
   ['guide-tab-enemies', 'bestiary-grid'],
   ['guide-tab-elites', 'guide-elites'],
   ['guide-tab-fusions', 'guide-fusions'],
+  ['guide-tab-shortcuts', 'guide-shortcuts'],
 ];
 
 function showTab(tabId: string): void {
@@ -228,13 +372,14 @@ function showTab(tabId: string): void {
   }
 }
 
-export function openBestiary(tab: 'enemies' | 'elites' | 'fusions' = 'enemies'): void {
+export function openBestiary(tab: 'enemies' | 'elites' | 'fusions' | 'shortcuts' = 'enemies'): void {
   build();
   showTab(`guide-tab-${tab}`);
   $('overlay-bestiary').hidden = false;
 }
 
 function closeBestiary(): void {
+  endCapture(); // cerrar cancela cualquier reasignación en curso
   $('overlay-bestiary').hidden = true;
 }
 
@@ -259,7 +404,40 @@ export function initBestiary(): void {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeBestiary();
   });
+
+  // pestaña Atajos: delegación (el pane se rehace en cada reasignación). Un clic
+  // en el botón de una acción arma la captura; en «Restaurar» reinicia todo.
+  $('guide-shortcuts').addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    const remap = target.closest<HTMLElement>('[data-remap]');
+    if (remap?.dataset.remap) {
+      startCapture(remap.dataset.remap as KeymapAction, remap);
+      return;
+    }
+    if (target.closest('[data-reset]')) {
+      if (confirm('¿Restaurar TODOS los atajos a sus valores por defecto?')) {
+        endCapture();
+        resetKeys();
+        renderShortcuts();
+        syncHotkeyLabels();
+        setMsg('↩ Atajos restaurados por defecto.');
+      }
+    }
+  });
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !overlay.hidden) closeBestiary();
+    if (e.key === 'Escape' && !overlay.hidden) {
+      // durante una captura, onCaptureKey (fase de captura) consume el Escape
+      // antes de llegar aquí, así que este solo cierra el overlay «en reposo».
+      closeBestiary();
+      return;
+    }
+    // atajo global (desktop): «?» abre la Guía directa en Atajos, fuera de inputs
+    if (e.key === '?' && overlay.hidden && desktopKeyboard()) {
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+      e.preventDefault();
+      openBestiary('shortcuts');
+    }
   });
 }

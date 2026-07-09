@@ -1,5 +1,6 @@
-import { placementError, TOWER_ORDER, TOWERS, type PlacementError, type TowerTypeId } from '@td/shared';
+import { placementError, TOWERS, type PlacementError, type TowerTypeId } from '@td/shared';
 import { net } from './net.js';
+import { actionForKey, towerTypeForAction } from './keymap.js';
 import { myGold, store } from './store.js';
 import { centerOn, getPlacementCtx, getView, minimapHit, panBy, resetCamera, zoomAt } from './renderer.js';
 import {
@@ -485,28 +486,32 @@ export function initInput(canvas: HTMLCanvasElement): void {
     // bomba llegaba como 'W' y no coincidía con la hotkey 'w'.
     const key = e.key.toLowerCase();
 
-    // mercado por teclado (sin abrir el panel): C compra un lote, V lo vende.
-    // El toast de la operación (o el rechazo) da el feedback.
-    if (!store.spectator && key === 'c') {
-      net.send({ type: 'cmd', cmd: { kind: 'buy_wood' } });
+    // todas las teclas de acción salen del keymap editable (ver keymap.ts). Una
+    // tecla sin acción asignada no hace nada.
+    const action = actionForKey(key);
+    if (!action) return;
+
+    // mercado por teclado (sin abrir el panel): comprar/vender un lote de madera.
+    // El toast de la operación (o el rechazo) da el feedback. Solo jugadores.
+    if (action === 'market_buy') {
+      if (!store.spectator) net.send({ type: 'cmd', cmd: { kind: 'buy_wood' } });
       return;
     }
-    if (!store.spectator && key === 'v') {
-      net.send({ type: 'cmd', cmd: { kind: 'sell_wood' } });
+    if (action === 'market_sell') {
+      if (!store.spectator) net.send({ type: 'cmd', cmd: { kind: 'sell_wood' } });
       return;
     }
-    // Lote 4 · control de la selección actual (torre o grupo): X = stop/reanudar,
-    // F = armar el modo focus. Elegidas por estar LIBRES en el keymap (torres:
-    // 1-9/0/q/w/e · mercado: C/V); ambas son no-op sin una selección controlable.
-    if (!store.spectator && key === 'x') {
-      toggleHaltSelection();
+    // Lote 4 · control de la selección actual (torre o grupo): stop/reanudar y
+    // armar el modo focus. Ambas son no-op sin una selección controlable.
+    if (action === 'stop') {
+      if (!store.spectator) toggleHaltSelection();
       return;
     }
-    if (!store.spectator && key === 'f') {
-      armFocus();
+    if (action === 'focus') {
+      if (!store.spectator) armFocus();
       return;
     }
-    const type = TOWER_ORDER.find((t) => TOWERS[t].hotkey === key);
+    const type = towerTypeForAction(action);
     if (type) {
       // espectador: la hotkey arma/desarma el "modo sugerencia" de esa torre
       if (store.spectator) {
