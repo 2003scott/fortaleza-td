@@ -790,6 +790,11 @@ function wireHudButtons(): void {
   }
 }
 
+// Precalienta EmojiFix (subconjunto de Noto Color Emoji para 🪙/🪵/🧌…): el
+// canvas no dispara la descarga de webfonts por sí solo, así que sin esto los
+// textos flotantes «+🪙4» saldrían como cajas en sistemas sin esos emojis.
+document.fonts?.load('12px EmojiFix', '\u{1FA99}').catch(() => {});
+
 const canvas = $('game-canvas') as HTMLCanvasElement;
 initRenderer(canvas);
 initInput(canvas);
