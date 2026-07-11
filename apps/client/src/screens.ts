@@ -353,7 +353,8 @@ export function initLobby(): void {
     net.send({ type: 'set_ready', ready: !(me?.ready ?? false) });
   });
 
-  // expulsar / ceder anfitrión (solo anfitrión): delegación en la lista de jugadores
+  // expulsar / ceder anfitrión / mover a espectadores (solo anfitrión): delegación
+  // en la lista de jugadores
   $('lobby-players').addEventListener('click', (e) => {
     const kickBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-kick]');
     if (kickBtn && store.isHost) {
@@ -365,6 +366,20 @@ export function initLobby(): void {
       const name = cedeBtn.title.replace('Ceder anfitrión a ', '');
       if (confirm(`¿Ceder la sala a ${name}? Ya no podrás iniciar la partida ni cambiar los ajustes.`))
         net.send({ type: 'transfer_host', playerId: cedeBtn.dataset.cede! });
+      return;
+    }
+    const spectateBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-spectate]');
+    if (spectateBtn && store.isHost) {
+      net.send({ type: 'move_to_spectator', playerId: spectateBtn.dataset.spectate! });
+    }
+  });
+
+  // traer de vuelta como jugador (solo anfitrión): delegación en la zona de
+  // espectadores (es un <ul> hermano de #lobby-players, no un descendiente)
+  $('lobby-spectators').addEventListener('click', (e) => {
+    const toPlayerBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-toplayer]');
+    if (toPlayerBtn && store.isHost) {
+      net.send({ type: 'move_to_player', spectatorId: toPlayerBtn.dataset.toplayer! });
     }
   });
 
@@ -397,7 +412,7 @@ export function initLobby(): void {
 }
 
 export function renderLobby(): void {
-  const { players, settings } = store.lobby;
+  const { players, spectators, settings } = store.lobby;
   $('lobby-code').textContent = store.roomCode;
 
   $('lobby-players').innerHTML = players
@@ -417,13 +432,36 @@ export function renderLobby(): void {
       const kick = store.isHost && !isMe
         ? `<button class="kick-btn" data-kick="${p.id}" title="Expulsar a ${escapeHtml(p.name)}" aria-label="Expulsar">✕</button>`
         : '';
+      // mover a la zona de espectadores: para quien no quiere jugar la revancha,
+      // sin banearlo (a diferencia de expulsar)
+      const spectate = store.isHost && !isMe && !p.isHost
+        ? `<button class="spectate-btn" data-spectate="${p.id}" title="Mover a ${escapeHtml(p.name)} a espectadores" aria-label="Mover a espectadores">👁</button>`
+        : '';
       return `
       <li class="${p.connected ? '' : 'offline'}">
         <span class="player-dot" style="background:${p.color};color:${p.color}"></span>
         <span class="player-name">${escapeHtml(p.name)}${isMe ? ' (tú)' : ''}</span>
         ${badge}
         ${cede}
+        ${spectate}
         ${kick}
+      </li>`;
+    })
+    .join('');
+
+  // zona de espectadores: solo visible cuando hay alguien ahí. El anfitrión
+  // puede traerlos de vuelta como jugador (respetando MAX_PLAYERS en el server).
+  $('lobby-spectators-box').hidden = spectators.length === 0;
+  $('lobby-spectators').innerHTML = spectators
+    .map((s) => {
+      const isMe = s.id === store.playerId;
+      const toPlayer = store.isHost
+        ? `<button class="cede-btn" data-toplayer="${s.id}" title="Traer a ${escapeHtml(s.name)} como jugador" aria-label="Traer como jugador">🎮</button>`
+        : '';
+      return `
+      <li>
+        <span class="player-name">👁 ${escapeHtml(s.name)}${isMe ? ' (tú)' : ''}</span>
+        ${toPlayer}
       </li>`;
     })
     .join('');
@@ -444,19 +482,24 @@ export function renderLobby(): void {
   const readyBtn = $<HTMLButtonElement>('btn-ready');
   const status = $('lobby-ready-status');
 
+  // en la zona de espectadores del lobby no hay «Listo» que marcar: solo se
+  // espera a que el anfitrión te traiga de vuelta como jugador
   startBtn.hidden = !store.isHost;
-  readyBtn.hidden = store.isHost;
-  $('lobby-wait').hidden = store.isHost;
+  readyBtn.hidden = store.isHost || store.spectator;
+  $('lobby-wait').hidden = store.isHost || store.spectator;
+  $('lobby-spectating').hidden = !store.spectator;
 
   if (store.isHost) {
     startBtn.disabled = !allReady;
     startBtn.textContent = allReady ? '▶ ¡Empezar partida!' : '⏳ Esperando a que todos estén listos…';
     status.hidden = others.length === 0;
     status.textContent = others.length > 0 ? `${readyCount}/${others.length} jugadores listos` : '';
-  } else {
+  } else if (!store.spectator) {
     const iAmReady = me?.ready ?? false;
     readyBtn.classList.toggle('active', iAmReady);
     readyBtn.textContent = iAmReady ? '⏳ Cancelar «Listo»' : '✅ Estoy listo';
+    status.hidden = true;
+  } else {
     status.hidden = true;
   }
 }

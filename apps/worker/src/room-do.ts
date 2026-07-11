@@ -48,6 +48,10 @@ interface RoomPlayer {
   // ni por nombre) para volver a jugar; si vuelve con el enlace, entra de
   // espectador. Ver el flujo en addPlayer.
   abandoned?: boolean;
+  // llegó a jugador por promoción automática al terminar una partida donde
+  // estaba de espectador (ver promoteSpectators). Si nunca marca «Listo», el
+  // fallback automático lo regresa solo a espectador (ver demoteIdlePromoted).
+  cameFromSpectator?: boolean;
 }
 
 // Espectador: entra con la partida en curso. Ve la partida y puede guiar (chat
@@ -58,6 +62,11 @@ interface Spectator {
   token: string;
   name: string;
   ws: WebSocket;
+  // PINEADO por el anfitrión (o por demoteIdlePromoted): a diferencia de un
+  // espectador normal (que sí se promueve a jugador al terminar la partida en
+  // curso), este NUNCA se promueve solo — se queda en la zona de espectadores
+  // hasta que el anfitrión lo traiga de vuelta a mano (move_to_player).
+  pinned?: boolean;
 }
 
 type JoinResult =
@@ -72,6 +81,10 @@ const COUNTDOWN_SEC = 3;
 // código de cierre de socket cuando el anfitrión expulsa a un jugador (el cliente
 // lo respeta y NO se reconecta, igual que el 4001 de inactividad)
 const KICK_CODE = 4002;
+// tiempo de gracia para marcar «Listo» tras ser promovido de espectador a
+// jugador; pasado esto, se le regresa solo a espectador automáticamente (ver
+// demoteIdlePromoted) en vez de bloquear el lobby para siempre
+const SPECTATOR_GRACE_MS = 45_000;
 
 // F6.1 · Cierre por INACTIVIDAD (control de costes): si en 30 min nadie hace
 // NADA humano (los pings de keepalive NO cuentan), la sala avisa a los 28 y al
@@ -102,6 +115,9 @@ export class RoomDO {
   // cuentas regresivas de inicio y de reanudación (3 s); no-null = en marcha
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+  // ventana de gracia tras promoteSpectators(): a quien no marque «Listo» a
+  // tiempo se le devuelve solo a espectador (ver demoteIdlePromoted)
+  private demoteTimer: ReturnType<typeof setTimeout> | null = null;
   // tokens expulsados por el anfitrión: no pueden volver a entrar a ESTA sala
   // (el token vive en el storage del navegador; limpiarlo lo evade, pero cubre
   // el caso real: el expulsado reintentando con el mismo código)
@@ -382,6 +398,10 @@ export class RoomDO {
       clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
     }
+    if (this.demoteTimer) {
+      clearTimeout(this.demoteTimer);
+      this.demoteTimer = null;
+    }
   }
 
   private markConnected(playerId: string, connected: boolean): void {
@@ -407,6 +427,10 @@ export class RoomDO {
     }));
   }
 
+  private lobbySpectators(): { id: string; name: string }[] {
+    return this.spectators.map((s) => ({ id: s.id, name: s.name }));
+  }
+
   // ¿están listos TODOS los no-anfitriones conectados? (el anfitrión juega en
   // solitario si no hay nadie más). Bloquea el inicio hasta que el equipo confirme.
   private allReady(): boolean {
@@ -417,6 +441,7 @@ export class RoomDO {
     this.broadcast({
       type: 'lobby_state',
       players: this.lobbyPlayers(),
+      spectators: this.lobbySpectators(),
       settings: this.settings,
       inGame: this.game !== null && !this.game.over,
     });
@@ -498,6 +523,11 @@ export class RoomDO {
       clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
     }
+    if (this.demoteTimer) {
+      clearTimeout(this.demoteTimer);
+      this.demoteTimer = null;
+    }
+    for (const p of this.players) p.cameFromSpectator = false;
 
     // arrancar la grabación de la repetición: semilla, roster inicial y log vacío
     this.replaySeed = seed;
@@ -619,11 +649,20 @@ export class RoomDO {
 
   // Al terminar la partida, los espectadores pasan a ser jugadores de pleno
   // derecho en el lobby (respetando MAX_PLAYERS). Los que no caben siguen como
-  // espectadores.
+  // espectadores. Quien solo quería mirar y no marca «Listo» a tiempo vuelve
+  // solo a espectador automáticamente (ver demoteIdlePromoted) en vez de quedar
+  // atascado bloqueando el inicio de la revancha.
   private promoteSpectators(): void {
     if (this.spectators.length === 0) return;
     const stayed: Spectator[] = [];
+    let promotedAny = false;
     for (const spec of this.spectators) {
+      // pineado por el anfitrión (o por el fallback de inactividad): se queda
+      // de espectador para siempre, hasta que lo traigan de vuelta a mano
+      if (spec.pinned) {
+        stayed.push(spec);
+        continue;
+      }
       if (this.players.filter((p) => p.ws).length >= MAX_PLAYERS) {
         stayed.push(spec);
         continue;
@@ -639,12 +678,80 @@ export class RoomDO {
         ws: spec.ws,
         isHost,
         ready: isHost,
+        cameFromSpectator: !isHost,
       };
       this.players.push(player);
+      promotedAny = promotedAny || !isHost;
       // avísale que ya es jugador (actualiza spectator/isHost en el cliente)
       this.send(player, { type: 'room_joined', code: this.code, playerId: player.id, isHost: player.isHost, spectator: false });
     }
     this.spectators = stayed;
+    if (promotedAny) {
+      if (this.demoteTimer) clearTimeout(this.demoteTimer);
+      this.demoteTimer = setTimeout(() => {
+        this.demoteTimer = null;
+        this.demoteIdlePromoted();
+      }, SPECTATOR_GRACE_MS);
+    }
+  }
+
+  // pasado el tiempo de gracia, a quien fue promovido de espectador y sigue sin
+  // marcar «Listo» se le regresa solo a espectador (no banea, no lo saca de la
+  // sala): así deja de bloquear el «todos listos» para el resto del equipo.
+  private demoteIdlePromoted(): void {
+    if (this.game) return; // ya empezó otra partida: ya no aplica
+    const idle = this.players.filter((p) => p.cameFromSpectator && !p.ready);
+    for (const p of idle) {
+      this.demoteToSpectator(p, `${p.name} pasó a la zona de espectadores (no marcó «Listo»)`);
+    }
+    if (idle.length > 0) this.broadcastLobby();
+  }
+
+  // Mueve a un jugador del lobby a la lista de espectadores SIN banearlo (a
+  // diferencia de kick_player). Conserva id/token/nombre para que el cliente se
+  // reconozca. Usado por la acción manual del anfitrión y por demoteIdlePromoted.
+  private demoteToSpectator(target: RoomPlayer, announce: string): void {
+    this.players = this.players.filter((p) => p !== target);
+    if (target.isHost) {
+      const next = this.players.find((p) => p.ws);
+      if (next) {
+        next.isHost = true;
+        next.ready = true;
+      }
+    }
+    const ws = target.ws;
+    if (!ws) return; // desconectado: no hay socket que reclasificar
+    const spectator: Spectator = {
+      id: target.id,
+      token: target.token,
+      name: target.name,
+      ws,
+      pinned: true,
+    };
+    this.spectators.push(spectator);
+    this.systemMsg(announce);
+    this.sendTo(ws, { type: 'room_joined', code: this.code, playerId: spectator.id, isHost: false, spectator: true });
+    this.sendGameStateToSpectator(spectator);
+  }
+
+  // El anfitrión trae de vuelta a un espectador (pineado o no) como jugador del
+  // lobby. Falla en silencio si la sala está llena o no hay partida en el lobby.
+  private restoreToPlayer(spectator: Spectator): void {
+    this.spectators = this.spectators.filter((s) => s !== spectator);
+    const isHost = this.players.length === 0;
+    const player: RoomPlayer = {
+      id: spectator.id,
+      token: spectator.token,
+      name: spectator.name,
+      color: PLAYER_COLORS[this.players.length % PLAYER_COLORS.length],
+      ws: spectator.ws,
+      isHost,
+      ready: isHost,
+    };
+    this.players.push(player);
+    this.systemMsg(`${player.name} volvió a la sala como jugador`);
+    this.send(player, { type: 'room_joined', code: this.code, playerId: player.id, isHost: player.isHost, spectator: false });
+    this.sendGameStateTo(player);
   }
 
   // ---------- entrada de mensajes ----------
@@ -780,6 +887,36 @@ export class RoomDO {
         } catch {
           // ignore
         }
+        this.broadcastLobby();
+        break;
+      }
+
+      case 'move_to_spectator': {
+        if (!player.isHost) {
+          this.send(player, { type: 'error', msg: 'Solo el anfitrión puede mover a espectadores' });
+          break;
+        }
+        if (this.game && !this.game.over) break; // solo en el lobby
+        const target = this.players.find((p) => p.id === msg.playerId);
+        if (!target || target.id === player.id) break;
+        this.demoteToSpectator(target, `${target.name} pasó a la zona de espectadores`);
+        this.broadcastLobby();
+        break;
+      }
+
+      case 'move_to_player': {
+        if (!player.isHost) {
+          this.send(player, { type: 'error', msg: 'Solo el anfitrión puede traer jugadores' });
+          break;
+        }
+        if (this.game && !this.game.over) break; // solo en el lobby
+        const spectator = this.spectators.find((s) => s.id === msg.spectatorId);
+        if (!spectator) break;
+        if (this.players.filter((p) => p.ws).length >= MAX_PLAYERS) {
+          this.send(player, { type: 'error', msg: 'La sala está llena' });
+          break;
+        }
+        this.restoreToPlayer(spectator);
         this.broadcastLobby();
         break;
       }
