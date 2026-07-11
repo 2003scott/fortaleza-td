@@ -4,8 +4,12 @@ import {
   getMap,
   makePlacementContext,
   makeSimContext,
+  replayInit as makeReplaySim,
+  replayStep as stepReplaySim,
   sanitizeSettings,
+  sha256Hex,
   stepGame,
+  validateSaveData,
   BALANCE_VERSION,
   GAME_SPEEDS,
   MAX_PLAYERS,
@@ -21,6 +25,9 @@ import {
   type PublicRoomInfo,
   type ReplayEntry,
   type RoomSettings,
+  type SaveData,
+  type SaveSlot,
+  type SavedLobbyInfo,
   type ServerMsg,
   type SimContext,
   type TowerTypeId,
@@ -52,6 +59,10 @@ interface RoomPlayer {
   // estaba de espectador (ver promoteSpectators). Si nunca marca «Listo», el
   // fallback automático lo regresa solo a espectador (ver demoteIdlePromoted).
   cameFromSpectator?: boolean;
+  // issue #12 · lobby de una partida CARGADA: id del SaveSlot que este jugador
+  // reclama (por hash de token automático o «Adoptar»). Al reanudar, el jugador
+  // adopta ESA identidad (id/nombre/color) de la sim reconstruida.
+  claimedSlot?: string;
 }
 
 // Espectador: entra con la partida en curso. Ve la partida y puede guiar (chat
@@ -95,6 +106,25 @@ const IDLE_CLOSE_MS = 30 * 60_000;
 const IDLE_WARN_MS = IDLE_CLOSE_MS - 2 * 60_000;
 const IDLE_CLOSE_CODE = 4001;
 
+// issue #12 · saneado de identidades venidas de un archivo de guardado (no
+// confiable): nombre acotado en longitud y sin caracteres de control; color
+// limitado a un patrón hex (evita inyección en style="..."). Igual criterio que
+// el saneado de join_room.
+function cleanName(s: unknown): string {
+  // acota a 16 y descarta caracteres de control (code point < 32 o 127) sin
+  // meter bytes de control en el fuente ni depender de escapes frágiles.
+  let out = '';
+  for (const ch of String(s ?? '')) {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c >= 32 && c !== 127) out += ch;
+    if (out.length >= 16) break;
+  }
+  return out.trim() || 'Jugador';
+}
+function safeColor(s: unknown): string {
+  return typeof s === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(s) ? s : PLAYER_COLORS[0];
+}
+
 // Una sala = un Durable Object. Reutiliza toda la simulación de @td/shared;
 // solo el transporte (WebSocket) y la orquestación son específicos de Cloudflare.
 // Mientras haya un WebSocket abierto, el DO permanece en memoria (sin hibernar),
@@ -132,6 +162,16 @@ export class RoomDO {
   private replaySeed = 0;
   private replayInit: { mapId: string; mode: RoomSettings['mode']; difficulty: RoomSettings['difficulty']; players: { id: string; name: string; color: string }[] } | null = null;
   private replayLog: ReplayEntry[] = [];
+  // issue #12 · partida CARGADA de un guardado, esperando en el lobby de carga.
+  // Mientras no-null y sin `game`, la sala está en modo «reanudar guardado».
+  private savedGame: SaveData | null = null;
+  // la partida en curso es una REANUDACIÓN de un guardado: NO envía récord a la
+  // tabla (evita duplicar un highscore que la partida original ya pudo mandar).
+  private resumed = false;
+  // tick/oleada finales retenidos tras game_over para poder guardar desde la
+  // pantalla de FIN (this.game ya es null pero replayInit/replayLog siguen vivos).
+  private finishedTick = 0;
+  private finishedWave = 0;
   private lastPingAt = new Map<string, number>();
   private lastDirReport = 0; // último latido enviado al directorio de salas públicas
   private lastActivity = Date.now(); // última acción HUMANA (para el cierre por inactividad)
@@ -153,6 +193,37 @@ export class RoomDO {
       if (this.initialized || this.reserved) return new Response('taken', { status: 409 });
       this.reserved = true;
       this.code = (url.searchParams.get('code') ?? '').toUpperCase();
+      return new Response('ok');
+    }
+
+    // issue #12 · CARGAR partida guardada: el Worker reserva este DO y le manda el
+    // SaveData ya validado en el borde (revalidamos aquí, defensa en profundidad).
+    // La sala queda en modo «lobby de guardado» (savedGame no-null, sin game) hasta
+    // que alguien se una por WS y el anfitrión pulse empezar (fast-forward + reanudar).
+    if (url.pathname === '/loadsave') {
+      if (this.initialized || this.reserved) return new Response('taken', { status: 409 });
+      let save: unknown;
+      try {
+        save = await request.json();
+      } catch {
+        return new Response('bad save', { status: 400 });
+      }
+      const v = validateSaveData(save);
+      if (!v.ok) return new Response(v.msg, { status: 400 });
+      // el archivo es de origen no confiable: sanear nombres (longitud/control) y
+      // colores (patrón hex) igual que hace join_room, antes de que lleguen a los
+      // clientes (se inyectan en textContent/style). Los ids NO se tocan: los
+      // referencian el log y las tuplas jugador↔slot (romperlos rompería la reconstrucción).
+      const clean: SaveData = {
+        ...v.save,
+        players: v.save.players.map((p) => ({ ...p, name: cleanName(p.name), color: safeColor(p.color) })),
+        slots: v.save.slots.map((s) => ({ ...s, name: cleanName(s.name), color: safeColor(s.color) })),
+      };
+      this.reserved = true;
+      this.initialized = true;
+      this.code = (url.searchParams.get('code') ?? '').toUpperCase();
+      this.savedGame = clean;
+      this.settings = sanitizeSettings({ mapId: clean.mapId, mode: clean.mode, difficulty: clean.difficulty });
       return new Response('ok');
     }
 
@@ -469,15 +540,58 @@ export class RoomDO {
   }
 
   private broadcastLobby(): void {
+    const saved = this.savedLobbyInfo();
     this.broadcast({
       type: 'lobby_state',
       players: this.lobbyPlayers(),
       spectators: this.lobbySpectators(),
       settings: this.settings,
       inGame: this.game !== null && !this.game.over,
+      ...(saved ? { saved } : {}),
     });
     // cualquier cambio de sala (miembros/ajustes/estado) refresca el directorio
     this.reportPublic(true);
+  }
+
+  // ---------- lobby de una partida CARGADA (issue #12) ----------
+
+  // Info del guardado para el lobby de carga: mapa/oleada/defensores + qué
+  // RoomPlayer reclama cada slot. undefined cuando no hay guardado pendiente.
+  private savedLobbyInfo(): SavedLobbyInfo | undefined {
+    const save = this.savedGame;
+    if (!save || this.game) return undefined;
+    const claimBySlot = new Map<string, string>();
+    for (const p of this.players) if (p.claimedSlot) claimBySlot.set(p.claimedSlot, p.id);
+    return {
+      mapId: save.mapId,
+      mode: save.mode,
+      difficulty: save.difficulty,
+      wave: save.wave,
+      tick: save.tick,
+      slots: save.slots.map((s) => ({
+        id: s.id,
+        name: s.name,
+        color: s.color,
+        claimedBy: claimBySlot.get(s.id) ?? null,
+      })),
+    };
+  }
+
+  // Intenta reclamar automáticamente el slot cuyo tokenHash coincide con el token
+  // del jugador (recupera su identidad de la partida guardada). Async por sha256.
+  private async autoClaim(player: RoomPlayer): Promise<void> {
+    const save = this.savedGame;
+    if (!save || this.game || player.claimedSlot) return;
+    const hash = await sha256Hex(player.token + save.salt);
+    // no robar un slot ya reclamado por otro jugador conectado
+    const taken = new Set(this.players.filter((p) => p !== player && p.claimedSlot).map((p) => p.claimedSlot));
+    const slot = save.slots.find((s) => s.tokenHash && s.tokenHash === hash && !taken.has(s.id));
+    // el jugador pudo desconectarse mientras hasheábamos; comprobar que sigue
+    if (slot && this.players.includes(player) && !player.claimedSlot) {
+      player.claimedSlot = slot.id;
+      this.systemMsg(`✅ ${player.name} recuperó su lugar (${slot.name})`);
+      this.broadcastLobby();
+    }
   }
 
   // ---------- directorio de salas públicas (F5) ----------
@@ -550,6 +664,11 @@ export class RoomDO {
     this.pendingCmds = [];
     this.paused = false;
     this.speed = 1;
+    // partida NUEVA (no reanudada): sin guardado pendiente y sí puntúa récords
+    this.resumed = false;
+    this.savedGame = null;
+    this.finishedTick = 0;
+    this.finishedWave = 0;
     if (this.resumeTimer) {
       clearTimeout(this.resumeTimer);
       this.resumeTimer = null;
@@ -576,6 +695,164 @@ export class RoomDO {
     this.reviveLoop(true);
     // la lista de salas públicas pasa a mostrarla "en partida" (👁 observable)
     this.reportPublic(true);
+  }
+
+  // issue #12 · REANUDAR una partida guardada: reconstruye el estado ejecutando el
+  // registro de comandos hasta el tick guardado (fast-forward EN TROZOS para no
+  // bloquear el event loop del DO ni los pings WS) y arranca el loop en vivo. Los
+  // jugadores toman su slot (el reclamado o, si son pendientes, uno libre); el
+  // resto queda de espectador. La grabación continúa sobre el log del archivo.
+  private async startLoadedGame(): Promise<void> {
+    const save = this.savedGame;
+    if (!save || this.game) return;
+
+    // 1) fast-forward con el MISMO motor puro del replay, en trozos de 2000 ticks
+    const rdata: ReplayData = {
+      v: save.v,
+      seed: save.seed,
+      mapId: save.mapId,
+      mode: save.mode,
+      difficulty: save.difficulty,
+      players: save.players,
+      log: save.log,
+      finalTick: save.tick,
+      victory: false,
+      wave: save.wave,
+    };
+    const sim = makeReplaySim(rdata);
+    const target = save.tick;
+    while (sim.state.tick < target && !sim.state.over) {
+      const end = Math.min(target, sim.state.tick + 2000);
+      while (sim.state.tick < end && !sim.state.over) stepReplaySim(sim, rdata, sim.state.tick);
+      // ceder el event loop entre trozos (deja respirar pings/mensajes WS)
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    // ¿algo cambió mientras reconstruíamos (revancha, otra carga)? abortar sin tocar nada
+    if (this.game || this.savedGame !== save) return;
+
+    this.game = sim.state;
+    this.simCtx = sim.ctx;
+
+    // 2) continuar la GRABACIÓN: el log del archivo + lo nuevo = historial completo
+    this.replaySeed = save.seed;
+    this.replayInit = { mapId: save.mapId, mode: save.mode, difficulty: save.difficulty, players: save.players };
+    this.replayLog = save.log.slice();
+    this.resumed = true; // partida reanudada → no duplicar récord al terminar
+
+    // 3) identidades: cada jugador conectado toma su slot reclamado o, si es
+    //    pendiente, el primer slot libre. Los que no quepan pasan a espectadores.
+    const claimedIds = new Set(this.players.filter((p) => p.claimedSlot).map((p) => p.claimedSlot!));
+    const freeSlots = save.slots.filter((s) => !claimedIds.has(s.id)).map((s) => s.id);
+    const gamePlayers: RoomPlayer[] = [];
+    const newSpectators: Spectator[] = [];
+    for (const p of this.players) {
+      const slotId = p.claimedSlot ?? freeSlots.shift();
+      if (slotId) {
+        const slot = save.slots.find((s) => s.id === slotId)!;
+        p.id = slot.id; // adopta la identidad de la sim (controla sus torres)
+        p.name = slot.name;
+        p.color = slot.color;
+        p.claimedSlot = undefined;
+        gamePlayers.push(p);
+      } else if (p.ws) {
+        // sin slot libre: entra de espectador (la partida ya tiene sus defensores)
+        newSpectators.push({ id: `s${this.nextSpectatorNum++}`, token: p.token, name: p.name, ws: p.ws });
+      }
+    }
+    // el anfitrión debe seguir siendo jugador; si quedó fuera, ceder al primero
+    if (gamePlayers.length > 0 && !gamePlayers.some((p) => p.isHost)) {
+      for (const p of gamePlayers) p.isHost = false;
+      gamePlayers[0].isHost = true;
+    }
+    this.players = gamePlayers;
+    this.spectators.push(...newSpectators);
+
+    // 4) conexión de cada jugador de la sim = ¿hay jugador con ESE id y socket?
+    //    Registrar el delta como `conn` en el tick del guardado para que un futuro
+    //    guardado/replay de la partida reanudada reproduzca el mismo escalado.
+    for (const gp of this.game.players) {
+      const connected = this.players.some((p) => p.id === gp.id && p.ws);
+      if (gp.connected !== connected) {
+        gp.connected = connected;
+        this.replayLog.push({ t: this.game.tick, kind: 'conn', playerId: gp.id, connected });
+      }
+    }
+
+    this.savedGame = null;
+    this.pendingCmds = [];
+    this.paused = false;
+    this.speed = 1;
+
+    // 5) avisar a jugadores (su id cambió al del slot) y espectadores, y arrancar
+    for (const p of this.players) {
+      this.send(p, { type: 'room_joined', code: this.code, playerId: p.id, isHost: p.isHost });
+      this.send(p, { type: 'game_started', init: this.gameInit(p.id) });
+    }
+    for (const s of this.spectators) {
+      this.sendTo(s.ws, { type: 'room_joined', code: this.code, playerId: s.id, isHost: false, spectator: true });
+      this.sendGameStateToSpectator(s);
+    }
+    // un guardado tomado en la pantalla de FIN reconstruye una partida YA terminada:
+    // no hay nada que reanudar (el loop nunca la volvería a cerrar) → mostrar el fin.
+    if (this.game.over) {
+      this.endGame();
+    } else {
+      this.reviveLoop(true);
+      this.systemMsg(`▶ Partida reanudada desde la oleada ${this.game.wave}`);
+    }
+    this.reportPublic(true);
+  }
+
+  // issue #12 · GUARDAR: construye el SaveData y lo envía al que lo pidió. Toma una
+  // FOTO síncrona del tick + log (evita capturar entradas de ticks posteriores si
+  // llega un tick durante los await de sha256) y luego hashea los tokens con la sal.
+  private async handleSaveRequest(ws: WebSocket, saltRaw: string): Promise<void> {
+    const salt = String(saltRaw ?? '')
+      .replace(/[^a-f0-9]/gi, '')
+      .slice(0, 128);
+    if (!salt) {
+      this.sendTo(ws, { type: 'error', msg: 'No se pudo guardar (sal inválida)' });
+      return;
+    }
+    if (!this.replayInit) {
+      this.sendTo(ws, { type: 'error', msg: 'No hay partida para guardar todavía' });
+      return;
+    }
+    const active = this.game !== null && !this.game.over;
+    const tick = active ? this.game!.tick : this.finishedTick;
+    const wave = active ? this.game!.wave : this.finishedWave;
+    if (!active && this.finishedTick === 0) {
+      this.sendTo(ws, { type: 'error', msg: 'No hay partida para guardar' });
+      return;
+    }
+    // foto síncrona ANTES de cualquier await
+    const roster = this.replayInit.players.slice();
+    const logSnapshot = this.replayLog.slice();
+    const tokenById = new Map(this.players.map((p) => [p.id, p.token]));
+    const init = this.replayInit;
+    const seed = this.replaySeed;
+
+    const slots: SaveSlot[] = [];
+    for (const rp of roster) {
+      const token = tokenById.get(rp.id);
+      const tokenHash = token ? await sha256Hex(token + salt) : '';
+      slots.push({ id: rp.id, name: rp.name, color: rp.color, tokenHash });
+    }
+    const save: SaveData = {
+      kind: 'fortaleza-save',
+      v: BALANCE_VERSION,
+      seed,
+      mapId: init.mapId,
+      mode: init.mode,
+      difficulty: init.difficulty,
+      players: roster,
+      log: logSnapshot,
+      tick,
+      wave,
+      salt,
+      slots,
+    };
+    this.sendTo(ws, { type: 'save_info', save });
   }
 
   // arranca (o reanuda) el bucle de simulación si hay partida activa y jugadores
@@ -634,6 +911,10 @@ export class RoomDO {
     if (!this.game) return;
     const g = this.game;
     const replay = this.buildReplay(g);
+    // retener tick/oleada finales: permiten guardar desde la pantalla de FIN
+    // (this.game pasará a null pero replayInit/replayLog siguen vivos hasta la revancha)
+    this.finishedTick = g.tick;
+    this.finishedWave = g.wave;
     const stats: EndStats = {
       victory: g.over?.victory ?? false,
       wave: g.wave,
@@ -652,8 +933,10 @@ export class RoomDO {
         towersBuilt: p.stats.towersBuilt,
       })),
     };
-    // récords: endless (Infinito) y horde (Horda) puntúan por oleada alcanzada
-    if (g.mode === 'endless' || g.mode === 'horde') {
+    // récords: endless (Infinito) y horde (Horda) puntúan por oleada alcanzada.
+    // Una partida REANUDADA de un guardado NO envía récord: la partida original ya
+    // pudo mandarlo, y sumar otro con la misma oleada duplicaría la entrada.
+    if (!this.resumed && (g.mode === 'endless' || g.mode === 'horde')) {
       void saveScore(this.env, {
         names: g.players.map((p) => p.name),
         wave: g.wave,
@@ -786,6 +1069,9 @@ export class RoomDO {
     this.systemMsg(`${player.name} volvió a la sala como jugador`);
     this.send(player, { type: 'room_joined', code: this.code, playerId: player.id, isHost: player.isHost, spectator: false });
     this.sendGameStateTo(player);
+    // issue #12 · lobby de un guardado: al volver a jugador se perdió su reclamo
+    // (vivía en el RoomPlayer anterior) — reintentar el auto-reclamo por token
+    void this.autoClaim(player);
   }
 
   // ---------- entrada de mensajes ----------
@@ -879,6 +1165,8 @@ export class RoomDO {
       this.sendTo(ws, { type: 'room_joined', code: this.code, playerId: player.id, isHost: player.isHost });
       this.broadcastLobby();
       this.sendGameStateTo(player);
+      // lobby de un guardado: intentar recuperar su slot por hash de token (async)
+      void this.autoClaim(player);
       return;
     }
 
@@ -1031,6 +1319,16 @@ export class RoomDO {
         }
         if (this.game && !this.game.over) break;
         if (this.startTimer) break; // ya en cuenta atrás
+        // REANUDAR un guardado: sin gate de «Listo» (el anfitrión decide). Al llegar
+        // a 0, reconstruye la sim (fast-forward) y arranca en vivo desde el guardado.
+        if (this.savedGame) {
+          this.broadcast({ type: 'countdown', kind: 'start', seconds: COUNTDOWN_SEC });
+          this.startTimer = setTimeout(() => {
+            this.startTimer = null;
+            if (this.players.some((p) => p.ws)) void this.startLoadedGame();
+          }, COUNTDOWN_SEC * 1000);
+          break;
+        }
         if (!this.allReady()) {
           this.send(player, { type: 'error', msg: 'Espera a que todos marquen «Listo»' });
           break;
@@ -1041,6 +1339,29 @@ export class RoomDO {
           this.startTimer = null;
           if (this.players.some((p) => p.ws)) this.startGame();
         }, COUNTDOWN_SEC * 1000);
+        break;
+
+      // issue #12 · CARGAR: adoptar un slot libre del guardado (identidad de la
+      // partida). Solo en el lobby de carga (savedGame y sin partida).
+      case 'claim_slot': {
+        const save = this.savedGame;
+        if (!save || this.game) break;
+        const slot = save.slots.find((s) => s.id === msg.slot);
+        if (!slot) break;
+        const taken = this.players.some((p) => p !== player && p.claimedSlot === slot.id);
+        if (taken) {
+          this.send(player, { type: 'error', msg: 'Ese lugar ya está ocupado' });
+          break;
+        }
+        player.claimedSlot = slot.id;
+        this.broadcastLobby();
+        break;
+      }
+
+      // issue #12 · GUARDAR: construir el guardado con la sal del cliente (hashea los
+      // tokens server-side) y devolverlo. Async por sha256.
+      case 'save_request':
+        void this.handleSaveRequest(ws, msg.salt);
         break;
 
       case 'chat': {

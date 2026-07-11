@@ -1,4 +1,12 @@
-import { MAPS, type EndStats, type HighscoreEntry, type MapDef, type PublicRoomInfo, type RoomSettings } from '@td/shared';
+import {
+  MAPS,
+  type EndStats,
+  type HighscoreEntry,
+  type MapDef,
+  type PublicRoomInfo,
+  type RoomSettings,
+  type SavedLobbyInfo,
+} from '@td/shared';
 import { net, wsPathCreate, wsPathJoin } from './net.js';
 import { roomPrevToken, saveName, store } from './store.js';
 
@@ -396,6 +404,12 @@ export function initLobby(): void {
     }
   });
 
+  // issue #12 · lobby de una partida CARGADA: adoptar un slot libre (delegación)
+  $('lobby-slots').addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-claim]');
+    if (btn) net.send({ type: 'claim_slot', slot: btn.dataset.claim! });
+  });
+
   $('btn-leave').addEventListener('click', () => {
     net.disconnect(); // cierra el socket: el servidor nos saca de la sala
     store.roomCode = '';
@@ -425,6 +439,20 @@ export function initLobby(): void {
 }
 
 export function renderLobby(): void {
+  // issue #12 · lobby de una partida CARGADA: vista distinta (banner + slots)
+  if (store.lobby.saved) {
+    renderSavedLobby(store.lobby.saved);
+    return;
+  }
+  // lobby normal: asegurar que los elementos del modo «guardado» están ocultos
+  $('lobby-saved-banner').hidden = true;
+  $('lobby-slots').hidden = true;
+  $('lobby-slots-hint').hidden = true;
+  $('lobby-players').hidden = false;
+  $('lobby-players-title').textContent = 'Jugadores';
+  $('lobby-maps-box').hidden = false;
+  $('lobby-settings-fields').hidden = false;
+
   const { players, spectators, settings } = store.lobby;
   $('lobby-code').textContent = store.roomCode;
 
@@ -469,28 +497,7 @@ export function renderLobby(): void {
     })
     .join('');
 
-  // zona de espectadores: solo visible cuando hay alguien ahí. El anfitrión
-  // puede traerlos de vuelta como jugador (respetando MAX_PLAYERS en el server).
-  $('lobby-spectators-box').hidden = spectators.length === 0;
-  $('lobby-spectators').innerHTML = spectators
-    .map((s) => {
-      const isMe = s.id === store.playerId;
-      const toPlayer = store.isHost && !isMe
-        ? `<button class="cede-btn" data-toplayer="${s.id}" title="Traer a ${escapeHtml(s.name)} como jugador" aria-label="Traer como jugador">🎮</button>`
-        : '';
-      // banear también desde la zona de espectadores (p. ej. un expulsado que
-      // volvió de espectador y sigue molestando en el chat)
-      const ban = store.isHost && !isMe
-        ? `<button class="ban-btn" data-ban="${s.id}" data-name="${escapeHtml(s.name)}" title="Banear a ${escapeHtml(s.name)} (no podrá volver)" aria-label="Banear">🚫</button>`
-        : '';
-      return `
-      <li>
-        <span class="player-name">👁 ${escapeHtml(s.name)}${isMe ? ' (tú)' : ''}</span>
-        ${toPlayer}
-        ${ban}
-      </li>`;
-    })
-    .join('');
+  renderSpectatorZone();
 
   renderMapCards('lobby-maps', settings.mapId, !store.isHost, (id) => sendSettings({ mapId: id }));
   $('lobby-map-desc').textContent = mapDesc(settings.mapId);
@@ -528,6 +535,92 @@ export function renderLobby(): void {
   } else {
     status.hidden = true;
   }
+}
+
+// issue #12 · lobby de una partida CARGADA (guardado): banner con el resumen y
+// lista de slots reclamables. Cada jugador recupera su slot por token (auto) o
+// adopta uno libre. El anfitrión (quien cargó) reanuda cuando quiera.
+function renderSavedLobby(saved: SavedLobbyInfo): void {
+  $('lobby-code').textContent = store.roomCode;
+
+  const mapName = MAPS.find((m) => m.id === saved.mapId)?.name ?? saved.mapId;
+  const n = saved.slots.length;
+  const banner = $('lobby-saved-banner');
+  banner.hidden = false;
+  banner.innerHTML = `<b>📥 Partida guardada</b> · 🗺 ${escapeHtml(mapName)} · ${
+    MODE_LABELS[saved.mode] ?? escapeHtml(saved.mode)
+  } · ${DIFF_EMOJI[saved.difficulty] ?? ''} ${DIFF_LABELS[saved.difficulty] ?? escapeHtml(saved.difficulty)} · ⚔️ oleada ${
+    saved.wave
+  } · 🛡 ${n} defensor${n === 1 ? '' : 'es'}`;
+
+  // ocultar la edición de ajustes (mapa/modo/dificultad los fija el guardado)
+  $('lobby-maps-box').hidden = true;
+  $('lobby-settings-fields').hidden = true;
+
+  // slots en lugar de la lista de jugadores
+  $('lobby-players').hidden = true;
+  $('lobby-players-title').textContent = 'Defensores';
+  const slotsEl = $('lobby-slots');
+  slotsEl.hidden = false;
+  $('lobby-slots-hint').hidden = false;
+  const nameById = new Map(store.lobby.players.map((p) => [p.id, p.name]));
+  slotsEl.innerHTML = saved.slots
+    .map((s) => {
+      const mine = s.claimedBy === store.playerId;
+      const claimedName = s.claimedBy ? nameById.get(s.claimedBy) ?? 'alguien' : null;
+      const status = mine
+        ? '<span class="ready-tag on">✅ tú</span>'
+        : claimedName
+          ? `<span class="ready-tag on">👤 ${escapeHtml(claimedName)}</span>`
+          : `<button class="btn small primary" data-claim="${s.id}">Adoptar</button>`;
+      return `<li>
+        <span class="player-dot" style="background:${s.color};color:${s.color}"></span>
+        <span class="player-name">${escapeHtml(s.name)}</span>
+        ${status}
+      </li>`;
+    })
+    .join('');
+
+  // la zona de espectadores también existe aquí (benchados o expulsados que
+  // volvieron): misma lista y botones 🎮/🚫 que en el lobby normal
+  renderSpectatorZone();
+
+  // controles: el anfitrión reanuda; el resto espera
+  const startBtn = $<HTMLButtonElement>('btn-start');
+  const readyBtn = $<HTMLButtonElement>('btn-ready');
+  startBtn.hidden = !store.isHost;
+  startBtn.disabled = false;
+  startBtn.textContent = '▶ ¡Reanudar partida!';
+  readyBtn.hidden = true;
+  $('lobby-ready-status').hidden = true;
+  $('lobby-wait').hidden = store.isHost;
+}
+
+// zona de espectadores del lobby (normal o de guardado): solo visible cuando hay
+// alguien ahí. El anfitrión puede traerlos de vuelta como jugador (🎮, respetando
+// MAX_PLAYERS en el server) o banearlos (🚫).
+function renderSpectatorZone(): void {
+  const spectators = store.lobby.spectators;
+  $('lobby-spectators-box').hidden = spectators.length === 0;
+  $('lobby-spectators').innerHTML = spectators
+    .map((s) => {
+      const isMe = s.id === store.playerId;
+      const toPlayer = store.isHost && !isMe
+        ? `<button class="cede-btn" data-toplayer="${s.id}" title="Traer a ${escapeHtml(s.name)} como jugador" aria-label="Traer como jugador">🎮</button>`
+        : '';
+      // banear también desde la zona de espectadores (p. ej. un expulsado que
+      // volvió de espectador y sigue molestando en el chat)
+      const ban = store.isHost && !isMe
+        ? `<button class="ban-btn" data-ban="${s.id}" data-name="${escapeHtml(s.name)}" title="Banear a ${escapeHtml(s.name)} (no podrá volver)" aria-label="Banear">🚫</button>`
+        : '';
+      return `
+      <li>
+        <span class="player-name">👁 ${escapeHtml(s.name)}${isMe ? ' (tú)' : ''}</span>
+        ${toPlayer}
+        ${ban}
+      </li>`;
+    })
+    .join('');
 }
 
 // ---------- fin de partida ----------

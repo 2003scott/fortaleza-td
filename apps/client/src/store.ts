@@ -6,6 +6,7 @@ import type {
   MapDef,
   ReplayData,
   RoomSettings,
+  SavedLobbyInfo,
   Snap,
   TowerTypeId,
 } from '@td/shared';
@@ -90,6 +91,8 @@ export const store = {
     spectators: [] as LobbySpectator[],
     settings: { mapId: 'sendero', mode: 'classic', difficulty: 'normal', public: false } as RoomSettings,
     inGame: false,
+    // issue #12 · presente solo en el lobby de una partida CARGADA (guardado)
+    saved: undefined as SavedLobbyInfo | undefined,
   },
   game: null as GameStore | null,
   // reproductor de repeticiones: no-null mientras se reproduce una (desactiva el

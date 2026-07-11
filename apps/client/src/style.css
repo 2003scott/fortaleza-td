@@ -345,6 +345,17 @@ html, body {
 /* cabecera en UNA línea: título + código + cómo invitar */
 .lobby-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .lobby-head h2 { display: flex; align-items: center; gap: 10px; font-size: 1.35rem; }
+/* issue #12 · banner del lobby de una partida cargada (guardado) */
+.saved-banner {
+  margin: 6px 0 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
 .code-chip {
   background: var(--bg3);
   border: 1px dashed var(--accent);
