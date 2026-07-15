@@ -147,6 +147,16 @@
                 <button data-value="private">🔒 Privada<small>solo con el código</small></button>
                 <button data-value="public">🌐 Pública<small>aparece en la lista</small></button>
               </div>
+              <!-- MODO TURBO ⚡ (issue #14): solo clásico/infinito; en horda se
+                   deshabilita (ver renderLobby). Mismo patrón de segs que los demás. -->
+              <div id="lobby-turbo-box">
+                <h3>Turbo ⚡</h3>
+                <div id="lobby-turbo" class="seg">
+                  <button data-value="off">🐢 Normal</button>
+                  <button data-value="on">⚡ Turbo</button>
+                </div>
+                <p id="lobby-turbo-hint" class="hint">Economía ×1.75, madera ×1.5, interludios a la mitad. Mismo reto, la mitad de tiempo. Sin récords.</p>
+              </div>
             </div>
 
             <button id="btn-start" class="btn primary big">▶ ¡Empezar partida!</button>
@@ -177,6 +187,8 @@
         <div class="hud-group">
           <span id="hud-lives" class="stat">❤️ 20</span>
           <span id="hud-wave" class="stat"><span class="wv-word">Oleada</span><span class="wv-icon" aria-hidden="true">🌊</span> 0</span>
+          <!-- MODO TURBO ⚡ (issue #14): distintivo visible mientras dura una partida turbo -->
+          <span id="hud-turbo" class="stat turbo" title="Modo Turbo ⚡: economía comprimida, mismo reto. Sin récords." hidden>⚡ Turbo</span>
           <span id="hud-gold" class="stat gold">🪙 0</span>
           <button id="hud-wood" class="stat wood" title="Madera: tu orco leñador la tala sin parar. Especializar (★) cuesta 🪵45 y el Rango II (★★) 🪵60. Toca para abrir el MERCADO. Atajos: C compra · V vende.">🪵 0</button>
           <span id="hud-alive" class="stat" hidden>👾 0</span>
@@ -194,7 +206,23 @@
           <button id="btn-pause" class="btn small ghost" hidden>⏸<span class="blabel">Pausa</span></button>
           <button id="btn-mute" class="btn small ghost" title="Silenciar todo (efectos y música)"><span id="mute-icon">🔊</span><span class="blabel">Sonido</span></button>
           <button id="btn-settings" class="btn small ghost" title="Ajustes de sonido" aria-haspopup="true" aria-expanded="false">⚙<span class="blabel">Ajustes</span></button>
+          <!-- móvil apaisado: agrupa los botones de acción para no tapar el mapa
+               (se muestra solo en su @media; delega en los botones originales) -->
+          <button id="btn-hamburger" class="btn small ghost hamburger" title="Más opciones" aria-haspopup="true" aria-expanded="false">☰</button>
         </div>
+      </div>
+
+      <!-- menú desplegable de la hamburguesa (solo móvil apaisado). Cada botón
+           delega en su equivalente del HUD ($(origId).click()), así el
+           comportamiento vive en un único sitio. -->
+      <div id="hamburger-menu" class="hamburger-dropdown" hidden role="menu">
+        <button id="hamburger-ping" class="btn ghost" role="menuitem">📍 Ping</button>
+        <button id="hamburger-scoreboard" class="btn ghost" role="menuitem">📊 Jugadores</button>
+        <button id="hamburger-shop" class="btn ghost" role="menuitem">🛒 Tienda</button>
+        <button id="hamburger-guide" class="btn ghost" role="menuitem">📖 Guía</button>
+        <button id="hamburger-minimap" class="btn ghost" role="menuitem">🗺 Minimapa</button>
+        <button id="hamburger-mute" class="btn ghost" role="menuitem"><span id="hamburger-mute-icon">🔊</span> Sonido</button>
+        <button id="hamburger-settings" class="btn ghost" role="menuitem">⚙ Ajustes</button>
       </div>
 
       <div id="settings-panel" hidden role="dialog" aria-label="Ajustes de sonido">
@@ -324,6 +352,9 @@
           </div>
         </div>
       </div>
+      <!-- pantalla completa: botón en la esquina inferior derecha (sin atajo de
+           teclado: la 'F' ya es Fijar objetivo en el keymap) -->
+      <button id="btn-fullscreen" class="btn-fullscreen" title="Pantalla completa" aria-label="Pantalla completa">⛶</button>
     </section>
 
     <div id="overlay-reconnect" class="overlay" hidden>

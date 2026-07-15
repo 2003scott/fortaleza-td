@@ -66,6 +66,24 @@ function showCountdown(kind: 'start' | 'resume', seconds: number): void {
   }, 1000);
 }
 
+// ---------- desglose de oro por oleada (feedback "se gana poco oro") ----------
+// Acumulado LOCAL alimentado SOLO desde eventos que ya llegan; se reinicia en cada
+// wave_start y se vuelca en un toast al terminar la oleada. Mide únicamente lo que
+// se puede atribuir HONESTAMENTE al jugador local: botín de MIS bajas, ingreso de
+// MIS minas y el bono (compartido) de fin de oleada; además, asistencias y robos
+// observados. No inventa categorías que los eventos no permiten separar.
+interface WaveGold {
+  loot: number; // botín de enemigos rematados por MÍ (incluye el extra del Alquimista)
+  mines: number; // ingreso de fin de oleada de minas que me pagan a MÍ
+  bonus: number; // bono de fin de oleada (igual para todo el equipo)
+  assist: number; // oro de asistencia co-op cobrado por MÍ
+  steal: number; // oro que un Ladrón robó (repartido en el equipo; total observado)
+}
+function emptyWaveGold(): WaveGold {
+  return { loot: 0, mines: 0, bonus: 0, assist: 0, steal: 0 };
+}
+let waveGold: WaveGold = emptyWaveGold();
+
 // ---------- procesado de eventos de la simulación ----------
 
 function processEvents(events: GameEvent[]): void {
@@ -131,6 +149,9 @@ function processEvents(events: GameEvent[]): void {
             boosted ? 14 : ev.elite ? 15 : 13,
           );
         }
+        // desglose de oro: el botín va a QUIEN dio el golpe final (ev.killer); solo
+        // cuenta el mío. ev.bounty ya incluye el extra del Alquimista si lo hubo.
+        if (ev.killer === store.playerId && ev.bounty > 0) waveGold.loot += ev.bounty;
         // firma de muerte según jerarquía: jefe (percusión) > élite (sting) > resto.
         if (def.boss) sfx.bossDeath(pan);
         else if (ev.elite) sfx.eliteDeath(pan);
@@ -153,20 +174,34 @@ function processEvents(events: GameEvent[]): void {
       case 'steal':
         toast(`🪙 ¡El Ladrón te robó ${ev.gold} de oro!`);
         floatText(ev.x, ev.y - 0.3, `-🪙${ev.gold}`, '#ef5350', 14);
+        waveGold.steal += ev.gold;
         addShake(3);
         sfx.leak();
         break;
       case 'wave_start':
+        waveGold = emptyWaveGold(); // arranca el desglose de la nueva oleada
         toast(`⚔️ ¡Oleada ${ev.wave}!`, 'info');
         sfx.wave();
         break;
-      case 'wave_end':
-        toast(`✅ Oleada ${ev.wave} superada · +🪙${ev.bonus} para todos`, 'info');
+      case 'wave_end': {
         sfx.coin();
+        // los espectadores/replay no ganan oro propio: para ellos el aviso simple.
+        if (store.spectator) {
+          toast(`✅ Oleada ${ev.wave} superada · +🪙${ev.bonus} para todos`, 'info');
+          break;
+        }
+        // desglose honesto de MI oro de la oleada: botín · minas · bono (+ asist/robo)
+        waveGold.bonus = ev.bonus;
+        const segs = [`botín ${waveGold.loot}`, `minas ${waveGold.mines}`, `bono ${waveGold.bonus}`];
+        if (waveGold.assist > 0) segs.push(`🤝 ${waveGold.assist}`);
+        if (waveGold.steal > 0) segs.push(`💔 −${waveGold.steal}`);
+        toast(`🪙 Oleada ${ev.wave}: ${segs.join(' · ')}`, 'info');
         break;
+      }
       case 'income':
         floatText(ev.x, ev.y - 0.4, `+🪙${ev.amount}`, '#ffd54f', 13);
         // el ingreso de la mina es de oleada (sin foco espacial): pan neutro.
+        if (ev.playerId === store.playerId) waveGold.mines += ev.amount;
         sfx.coin();
         break;
       case 'assist': {
@@ -174,7 +209,10 @@ function processEvents(events: GameEvent[]): void {
         // moneda SOLO suena si el asistente eres TÚ (no ensuciar el audio ajeno).
         const acolor = gs.init.players.find((p) => p.id === ev.player)?.color ?? '#ffd54f';
         floatText(ev.x, ev.y - 0.15, `+${ev.gold} 🤝`, acolor, 12);
-        if (ev.player === store.playerId) sfx.coin();
+        if (ev.player === store.playerId) {
+          waveGold.assist += ev.gold;
+          sfx.coin();
+        }
         break;
       }
       case 'orc':
@@ -625,8 +663,14 @@ function wireHudButtons(): void {
 
   const muteBtn = $('btn-mute');
   // solo se toca el ICONO (span #mute-icon): escribir textContent en el botón
-  // destruiría la etiqueta de texto de escritorio (.blabel)
-  const syncMute = () => ($('mute-icon').textContent = store.muted ? '🔇' : '🔊');
+  // destruiría la etiqueta de texto de escritorio (.blabel). Se sincroniza también
+  // el icono del menú hamburguesa, que refleja el mismo estado de mute.
+  const syncMute = () => {
+    const icon = store.muted ? '🔇' : '🔊';
+    $('mute-icon').textContent = icon;
+    const hamIcon = document.getElementById('hamburger-mute-icon');
+    if (hamIcon) hamIcon.textContent = icon;
+  };
   syncMute();
   muteBtn.addEventListener('click', () => {
     // setMuted baja el MASTER a 0: calla también la música y la reverb en vuelo
@@ -674,6 +718,56 @@ function wireHudButtons(): void {
   panel.addEventListener('click', (e) => e.stopPropagation());
   document.addEventListener('click', () => {
     if (!panel.hidden) closePanel();
+  });
+
+  // ---------- menú hamburguesa ☰ (móvil apaisado) ----------
+  // Agrupa los botones de acción del HUD en un desplegable para no tapar el mapa.
+  // Cada opción DELEGA en el botón original ($(origId).click()), así toda la
+  // lógica sigue viviendo en un solo sitio; aquí solo se abre/cierra el menú.
+  const hamBtn = $('btn-hamburger');
+  const hamMenu = $('hamburger-menu');
+  const closeHam = () => {
+    hamMenu.hidden = true;
+    hamBtn.setAttribute('aria-expanded', 'false');
+  };
+  const hamMap: [string, string][] = [
+    ['hamburger-ping', 'btn-ping'],
+    ['hamburger-scoreboard', 'btn-scoreboard'],
+    ['hamburger-shop', 'btn-shop'],
+    ['hamburger-guide', 'btn-guide'],
+    ['hamburger-minimap', 'btn-minimap'],
+    ['hamburger-mute', 'btn-mute'],
+    ['hamburger-settings', 'btn-settings'],
+  ];
+  for (const [hamId, origId] of hamMap) {
+    $(hamId).addEventListener('click', () => {
+      closeHam();
+      $(origId).click();
+    });
+  }
+  hamBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = hamMenu.hidden;
+    hamMenu.hidden = !open;
+    hamBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  // clic dentro del menú no lo cierra; clic fuera sí (mismo patrón que ⚙).
+  hamMenu.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => {
+    if (!hamMenu.hidden) closeHam();
+  });
+
+  // ---------- pantalla completa ⛶ ----------
+  // Solo botón (sin atajo: la 'F' es Fijar objetivo en el keymap). El estado se
+  // refleja con la clase .fs-active mediante el evento fullscreenchange, que
+  // cubre también salir con Esc o F11.
+  const fsBtn = $('btn-fullscreen');
+  const syncFs = () => fsBtn.classList.toggle('fs-active', !!document.fullscreenElement);
+  document.addEventListener('fullscreenchange', syncFs);
+  document.addEventListener('webkitfullscreenchange', syncFs);
+  fsBtn.addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else document.documentElement.requestFullscreen().catch(() => {});
   });
 
   // 📱 Continuar en otro dispositivo (issue #6): enlace con el código de sala +

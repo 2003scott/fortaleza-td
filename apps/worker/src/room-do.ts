@@ -39,6 +39,7 @@ export interface Env {
   ROOM: DurableObjectNamespace;
   DIRECTORY?: DurableObjectNamespace; // directorio de salas públicas (F5)
   SCORES?: KVNamespace;
+  ADMIN_TOKEN?: string; // secreto (wrangler secret) para /api/admin/announce
 }
 
 interface RoomPlayer {
@@ -160,14 +161,11 @@ export class RoomDO {
   private speed = 1;
   // ---- grabación de la repetición (replay) de la partida en curso ----
   private replaySeed = 0;
-  private replayInit: { mapId: string; mode: RoomSettings['mode']; difficulty: RoomSettings['difficulty']; players: { id: string; name: string; color: string }[] } | null = null;
+  private replayInit: { mapId: string; mode: RoomSettings['mode']; difficulty: RoomSettings['difficulty']; turbo: boolean; players: { id: string; name: string; color: string }[] } | null = null;
   private replayLog: ReplayEntry[] = [];
   // issue #12 · partida CARGADA de un guardado, esperando en el lobby de carga.
   // Mientras no-null y sin `game`, la sala está en modo «reanudar guardado».
   private savedGame: SaveData | null = null;
-  // la partida en curso es una REANUDACIÓN de un guardado: NO envía récord a la
-  // tabla (evita duplicar un highscore que la partida original ya pudo mandar).
-  private resumed = false;
   // tick/oleada finales retenidos tras game_over para poder guardar desde la
   // pantalla de FIN (this.game ya es null pero replayInit/replayLog siguen vivos).
   private finishedTick = 0;
@@ -214,17 +212,47 @@ export class RoomDO {
       // colores (patrón hex) igual que hace join_room, antes de que lleguen a los
       // clientes (se inyectan en textContent/style). Los ids NO se tocan: los
       // referencian el log y las tuplas jugador↔slot (romperlos rompería la reconstrucción).
+      // Cubre players[], slots[] Y el `player` de las entradas `join` del LOG (un
+      // mid-join reconstruido aparece en el marcador con ESE nombre; sin este saneo
+      // se saltaba la limpieza y solo lo frenaba el escape del cliente al pintar).
       const clean: SaveData = {
         ...v.save,
         players: v.save.players.map((p) => ({ ...p, name: cleanName(p.name), color: safeColor(p.color) })),
         slots: v.save.slots.map((s) => ({ ...s, name: cleanName(s.name), color: safeColor(s.color) })),
+        log: v.save.log.map((e) =>
+          e.kind === 'join'
+            ? { ...e, player: { ...e.player, name: cleanName(e.player.name), color: safeColor(e.player.color) } }
+            : e,
+        ),
       };
       this.reserved = true;
       this.initialized = true;
       this.code = (url.searchParams.get('code') ?? '').toUpperCase();
       this.savedGame = clean;
-      this.settings = sanitizeSettings({ mapId: clean.mapId, mode: clean.mode, difficulty: clean.difficulty });
+      // conservar el turbo del guardado para que el lobby de carga muestre el ⚡ y la
+      // reanudación arranque en modo turbo (sanitizeSettings lo ignora en horda igual)
+      this.settings = sanitizeSettings({ mapId: clean.mapId, mode: clean.mode, difficulty: clean.difficulty, turbo: clean.turbo });
       return new Response('ok');
+    }
+
+    // anuncio administrativo (aviso de despliegue): el Worker ya validó el
+    // ADMIN_TOKEN; aquí solo se difunde a todos los conectados de esta sala.
+    if (url.pathname === '/announce' && request.method === 'POST') {
+      let text = '';
+      try {
+        const body = (await request.json()) as { text?: string };
+        text = String(body.text ?? '').slice(0, 200).trim();
+      } catch {
+        /* cuerpo inválido → text vacío */
+      }
+      if (!text) return new Response('bad text', { status: 400 });
+      const delivered = this.connectedCount();
+      // con autor NO vacío: los mensajes de sistema (from '') solo se pintan en
+      // el killfeed in-game, y este aviso debe verse también en el chat del LOBBY
+      if (delivered > 0) this.broadcast({ type: 'chat', from: '📢 Aviso', color: '#ffb300', text });
+      return new Response(JSON.stringify({ delivered }), {
+        headers: { 'content-type': 'application/json' },
+      });
     }
 
     if (request.headers.get('Upgrade') !== 'websocket') {
@@ -604,16 +632,20 @@ export class RoomDO {
   // Reporta esta sala al directorio (fire-and-forget; jamás bloquea la sala).
   // `force` = cambio de estado real; sin force actúa de LATIDO con throttle de
   // 10 s (lo disparan los pings de keepalive de los clientes y el tick de sim).
+  // TODAS las salas con gente conectada laten (también las privadas): el
+  // directorio necesita conocerlas para difundir los avisos de despliegue.
+  // Solo las públicas con jugadores llevan `listed` y salen en /list.
   private reportPublic(force = false): void {
-    if (!this.initialized || !this.settings.public) return;
+    if (!this.initialized) return;
     if (!force && Date.now() - this.lastDirReport < 10_000) return;
     const stub = this.directoryStub();
     if (!stub) return;
     const connected = this.players.filter((p) => p.ws).length;
-    if (connected === 0) return; // sala sin jugadores conectados: no listar
+    if (this.connectedCount() === 0) return; // sala sin nadie conectado: no reportar
     this.lastDirReport = Date.now();
     const host = this.players.find((p) => p.isHost) ?? this.players[0];
-    const info: PublicRoomInfo = {
+    const info: PublicRoomInfo & { listed: boolean } = {
+      listed: this.settings.public === true && connected > 0,
       code: this.code,
       host: host?.name ?? '',
       mapId: this.settings.mapId,
@@ -622,6 +654,7 @@ export class RoomDO {
       players: connected,
       inGame: this.game !== null && !this.game.over,
       wave: this.game && !this.game.over ? this.game.wave : 0,
+      turbo: this.settings.turbo === true, // MODO TURBO ⚡: distintivo en la lista de salas públicas
     };
     void stub
       .fetch('https://do/report', { method: 'POST', body: JSON.stringify(info) })
@@ -643,6 +676,7 @@ export class RoomDO {
       mapId: this.game!.mapId,
       mode: this.game!.mode,
       difficulty: this.game!.difficulty,
+      turbo: this.game!.turbo, // MODO TURBO ⚡: el cliente pinta el distintivo ⚡ en el HUD
       players: this.game!.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
       youAre: forPlayerId,
     };
@@ -659,13 +693,15 @@ export class RoomDO {
       this.settings.difficulty,
       seed,
       this.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
+      // MODO TURBO ⚡: ya normalizado por sanitizeSettings (false en horda); createGame
+      // lo vuelve a normalizar como defensa
+      this.settings.turbo,
     );
     this.simCtx = makeSimContext(map, makePlacementContext(map));
     this.pendingCmds = [];
     this.paused = false;
     this.speed = 1;
-    // partida NUEVA (no reanudada): sin guardado pendiente y sí puntúa récords
-    this.resumed = false;
+    // partida NUEVA: sin guardado pendiente
     this.savedGame = null;
     this.finishedTick = 0;
     this.finishedWave = 0;
@@ -685,6 +721,7 @@ export class RoomDO {
       mapId: map.id,
       mode: this.settings.mode,
       difficulty: this.settings.difficulty,
+      turbo: this.game.turbo, // el valor YA normalizado por createGame (false en horda)
       players: this.game.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
     };
     this.replayLog = [];
@@ -718,6 +755,7 @@ export class RoomDO {
       finalTick: save.tick,
       victory: false,
       wave: save.wave,
+      turbo: save.turbo ?? false, // MODO TURBO ⚡: reconstruir con el mismo turbo del guardado
     };
     const sim = makeReplaySim(rdata);
     const target = save.tick;
@@ -735,9 +773,8 @@ export class RoomDO {
 
     // 2) continuar la GRABACIÓN: el log del archivo + lo nuevo = historial completo
     this.replaySeed = save.seed;
-    this.replayInit = { mapId: save.mapId, mode: save.mode, difficulty: save.difficulty, players: save.players };
+    this.replayInit = { mapId: save.mapId, mode: save.mode, difficulty: save.difficulty, turbo: save.turbo ?? false, players: save.players };
     this.replayLog = save.log.slice();
-    this.resumed = true; // partida reanudada → no duplicar récord al terminar
 
     // 3) identidades: cada jugador conectado toma su slot reclamado o, si es
     //    pendiente, el primer slot libre. Los que no quepan pasan a espectadores.
@@ -851,6 +888,7 @@ export class RoomDO {
       wave,
       salt,
       slots,
+      turbo: init.turbo, // MODO TURBO ⚡: el guardado conserva el turbo para reanudar igual
     };
     this.sendTo(ws, { type: 'save_info', save });
   }
@@ -904,6 +942,7 @@ export class RoomDO {
       finalTick: g.tick,
       victory: g.over?.victory ?? false,
       wave: g.wave,
+      turbo: g.turbo, // MODO TURBO ⚡: el replay tiene que reconstruir con el mismo turbo
     };
   }
 
@@ -934,9 +973,15 @@ export class RoomDO {
       })),
     };
     // récords: endless (Infinito) y horde (Horda) puntúan por oleada alcanzada.
-    // Una partida REANUDADA de un guardado NO envía récord: la partida original ya
-    // pudo mandarlo, y sumar otro con la misma oleada duplicaría la entrada.
-    if (!this.resumed && (g.mode === 'endless' || g.mode === 'horde')) {
+    // Una partida REANUDADA de un guardado SÍ puntúa: guardar y retomar es una
+    // feature, no un descalificador — si partes de un guardado y empujas hasta la
+    // oleada 70, es un logro real. El riesgo de duplicados (recargar el MISMO
+    // guardado varias veces y reenviar la misma marca) lo corta el dedup de
+    // saveScore (misma gente + oleada + modo/dificultad/mapa = una sola entrada).
+    // MODO TURBO ⚡: las partidas turbo NO puntúan — su economía comprimida da más
+    // oro con el mismo reto, así que compararlas con las normales sería injusto
+    // (irían a una tabla aparte; en v1, sencillamente no envían récord).
+    if (!g.turbo && (g.mode === 'endless' || g.mode === 'horde')) {
       void saveScore(this.env, {
         names: g.players.map((p) => p.name),
         wave: g.wave,
@@ -1461,6 +1506,10 @@ export class RoomDO {
         break;
       case 'ping':
         this.sendTo(spec.ws, { type: 'pong', t: msg.t });
+        // también late al directorio: una sala en LOBBY con solo espectadores
+        // no tiene ni tick de sim ni pings de jugador que la mantengan viva
+        // en el registro de anuncios
+        this.reportPublic();
         this.checkIdle();
         break;
       // un espectador que se va: cierre limpio del socket (dropSocket lo quita)

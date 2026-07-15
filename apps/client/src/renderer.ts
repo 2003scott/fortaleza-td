@@ -24,7 +24,7 @@ import {
 } from '@td/shared';
 import { store, type GameStore, type SnapFrame } from './store.js';
 import { drawParticles, floatText, updateParticles, fx } from './particles.js';
-import { getTowerSprite, getProjSprite } from './sprites.js';
+import { getTowerSprite, getProjSprite, getBossSprite } from './sprites.js';
 
 // ancho del sprite de torre en celdas (la base ≈ este valor; la estructura sube).
 const SPRITE_W = 1.15;
@@ -38,6 +38,14 @@ const PROJ_BY_TYPE: Partial<Record<TowerTypeId, string>> = {
   poison: 'poison',
   cannon: 'cannonball',
   mortar: 'bomb',
+  flak: 'flakneedle',
+};
+// Corrección de orientación por sprite: el convenio es que el PNG apunte al
+// NORTE, pero la hoja de la Balista se generó apuntando al NORESTE (45°).
+const PROJ_ANGLE_FIX: Record<string, number> = {
+  flakneedle: -Math.PI / 4,
+  flakburst: -Math.PI / 4,
+  flakharpoon: -Math.PI / 4,
 };
 
 // Los emojis siguen siendo el "lenguaje" de iconos del HUD (DOM);
@@ -59,6 +67,8 @@ export const TOWER_ICONS: Record<TowerTypeId, string> = {
   boom: '💥',
   // Lote 3
   sentry: '👁',
+  // F5.1
+  flak: '🪶',
 };
 
 export const ENEMY_ICONS: Record<EnemyTypeId, string> = {
@@ -1391,7 +1401,14 @@ function drawTowers(gs: GameStore, interp: InterpResult | null, now: number, dt:
   }
   const alive = new Set<number>();
 
-  for (const tw of snap.towers) {
+  // Algoritmo del pintor: dibujar las torres ordenadas por fila (Y, luego X) para
+  // que las de abajo queden ENCIMA de las de arriba y no tapen sus cañones ni sus
+  // proyectiles. El orden de `snap.towers` es indiferente para el resto del bucle
+  // (el Set `alive` se rellena por id y `towerAnim` se indexa por id), así que
+  // reordenar aquí es seguro.
+  const sortedTowers = [...snap.towers].sort((a, b) => a[3] - b[3] || a[2] - b[2]);
+
+  for (const tw of sortedTowers) {
     const [id, typeIdx, cx, cy, level, ownerIdx] = tw;
     const spec = tw[9] ?? -1;
     const fusionIdx = tw[13] ?? -1;
@@ -2202,6 +2219,53 @@ function drawTowerArt(
       }
       break;
     }
+    case 'flak': {
+      // F5.1 · Balista de Cielo (fallback procedural: aún sin hoja de sprites).
+      // Balista de brazos anchos que gira hacia su blanco AÉREO, dardo emplumado
+      // listo. Índigo claro (#8c9eff) para separarla del hielo y del Tesla.
+      g.save();
+      g.rotate(a);
+      g.translate(-rec, 0);
+      // bancada de madera
+      g.fillStyle = '#5d4037';
+      roundRect(g, -s * 0.2, -s * 0.09, s * 0.4 * grow, s * 0.18, s * 0.05);
+      g.fill();
+      // brazos de la balista (arco doble, muy abierto)
+      g.strokeStyle = '#8c9eff';
+      g.lineWidth = Math.max(1.5, s * 0.05);
+      for (const side of [-1, 1]) {
+        g.beginPath();
+        g.arc(s * 0.06, 0, s * 0.26 * grow, side * Math.PI * 0.16, side * Math.PI * 0.5, side < 0);
+        g.stroke();
+      }
+      // cuerda tensa
+      g.strokeStyle = '#e8eaf6';
+      g.lineWidth = Math.max(1, s * 0.02);
+      g.beginPath();
+      g.moveTo(s * 0.06, -s * 0.26 * grow);
+      g.lineTo(-s * 0.08 - rec, 0);
+      g.lineTo(s * 0.06, s * 0.26 * grow);
+      g.stroke();
+      // dardo antiaéreo con PLUMA (su emoji 🪶) en la cola
+      g.strokeStyle = '#c5cae9';
+      g.lineWidth = Math.max(1, s * 0.035);
+      g.beginPath();
+      g.moveTo(-s * 0.1, 0);
+      g.lineTo(s * 0.32, 0);
+      g.stroke();
+      g.fillStyle = '#e8eaf6';
+      g.beginPath();
+      g.moveTo(s * 0.38, 0);
+      g.lineTo(s * 0.26, -s * 0.06);
+      g.lineTo(s * 0.26, s * 0.06);
+      g.fill();
+      g.fillStyle = '#b3c2ff';
+      g.beginPath();
+      g.ellipse(-s * 0.12, -s * 0.03, s * 0.09, s * 0.035, -0.5, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+      break;
+    }
   }
   void def;
 
@@ -2853,7 +2917,19 @@ function drawEnemies(interp: InterpResult, now: number): void {
 
     g.save();
     g.translate(x, y);
-    drawEnemyArt(type, def.color, r, t, e.id, bob, s);
+    // JEFES con hoja de animación: 6 fotogramas ciclados por tiempo (~7 fps),
+    // desfasados por id para que dos jefes no marchen sincronizados. Altura
+    // normalizada (la quimera cambia de ANCHO al aletear: escalar por alto
+    // mantiene el cuerpo estable) y pies anclados junto a la sombra. Fallback
+    // al vector de siempre si la hoja no existe o aún carga.
+    const bossSprite = isBoss ? getBossSprite(type, Math.floor(now / 140) + e.id) : null;
+    if (bossSprite) {
+      const bh = r * 3.0;
+      const bw = (bossSprite.naturalWidth / bossSprite.naturalHeight) * bh;
+      g.drawImage(bossSprite, -bw / 2, r * 0.9 - bh, bw, bh);
+    } else {
+      drawEnemyArt(type, def.color, r, t, e.id, bob, s);
+    }
 
     // Lote 3 · DETECTADO (invisible revelado por un Sentry): shimmer sutil —
     // anillo celeste discontinuo que gira, para leer "esto solo lo ves por el Sentry".
@@ -3661,7 +3737,7 @@ function drawProjectiles(interp: InterpResult): void {
       const pw = (psprite.naturalWidth / psprite.naturalHeight) * ph;
       g.save();
       g.translate(x, y);
-      g.rotate(ang + Math.PI / 2);
+      g.rotate(ang + Math.PI / 2 + (PROJ_ANGLE_FIX[pn!] ?? 0));
       g.drawImage(psprite, -pw / 2, -ph / 2, pw, ph);
       g.restore();
       continue;
@@ -3808,11 +3884,20 @@ function drawPlacement(gs: GameStore, now: number): void {
   g.fillStyle = ok ? `rgba(120,220,120,${pulse})` : `rgba(240,80,80,${pulse})`;
   g.fillRect(toX(cx), toY(cy), s, s);
 
-  // torre fantasma (arte real, semitransparente)
+  // torre fantasma: si la torre tiene sprite (PNG), se dibuja semitransparente y
+  // anclado IGUAL que las torres reales (base en el borde inferior, ancho
+  // s*SPRITE_W); si no lo tiene, cae al arte vectorial de siempre.
   g.save();
   g.globalAlpha = 0.75;
   g.translate(toX(cx) + s / 2, toY(cy) + s / 2);
-  drawTowerArt(type, s, 1, now / 1000, { angle: -Math.PI / 2, recoil: 0, flash: 0 }, ok ? '#a5d6a7' : '#ef9a9a', false);
+  const spr = getTowerSprite(type, 1, -1);
+  if (spr) {
+    const w = s * SPRITE_W;
+    const h = (spr.naturalHeight / spr.naturalWidth) * w;
+    g.drawImage(spr, -w / 2, s * 0.5 - h, w, h);
+  } else {
+    drawTowerArt(type, s, 1, now / 1000, { angle: -Math.PI / 2, recoil: 0, flash: 0 }, ok ? '#a5d6a7' : '#ef9a9a', false);
+  }
   g.restore();
 }
 

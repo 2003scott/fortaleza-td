@@ -1,7 +1,7 @@
-// Prueba end-to-end contra el servidor real: dos clientes WebSocket crean una
+// Prueba end-to-end contra el backend real: dos clientes WebSocket crean una
 // sala, empiezan la partida, colocan una torre, llaman la oleada y verifican
 // que los enemigos se mueven y el chat funciona.
-// Requiere el servidor corriendo (PORT o 3000).
+// Requiere el WORKER de Cloudflare corriendo (pnpm cf:dev y PORT=8787).
 import WebSocket from 'ws';
 import {
   getMap,
@@ -17,7 +17,7 @@ import {
 
 // Sirve tanto para el servidor Node (ignora el query) como para el Worker de
 // Cloudflare (enruta por ?create=1 / ?code=XXXX al Durable Object de la sala).
-const HOST = `localhost:${process.env.PORT ?? 3000}`;
+const HOST = `localhost:${process.env.PORT ?? 8787}`;
 const BASE = `ws://${HOST}/ws`;
 const HTTP_BASE = `http://${HOST}`;
 const wsUrl = (opts: { create: true } | { code: string }): string =>
@@ -253,6 +253,11 @@ async function main(): Promise<void> {
   //     log del guardado reconstruye el estado congelado → crear sala from-save →
   //     reclamar slots por token → reanudar → verificar que continúa desde ahí.
   await saveLoadScenario();
+
+  // 12. MODO TURBO ⚡ (issue #14): crear sala con turbo=true, verificar que el flag
+  //     viaja por lobby_state/game_started, que la partida arranca y que un save de esa
+  //     partida CONSERVA turbo (y reconstruye el estado congelado con ese turbo).
+  await turboScenario();
 
   if (failures.length > 0) {
     console.error(`\n💥 ${failures.length} fallos`);
@@ -651,6 +656,16 @@ async function saveLoadScenario(): Promise<void> {
   bob.ws.close();
   await sleep(200);
 
+  // --- SEGURIDAD: un guardado ADULTERADO con oro inyectado en un mid-join se
+  // rechaza en el BORDE (el mismo validateSaveData que corre el cliente y el DO).
+  const hacked = { ...save, log: [...save.log, { t: 30, kind: 'join', player: { id: 'phack', name: 'Intruso', color: '#fff' }, gold: 999999999, wood: 0 }] };
+  const hackRes = await fetch(`${HTTP_BASE}/api/rooms/from-save`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(hacked),
+  });
+  assert(hackRes.status === 400, `el guardado con oro inyectado se rechaza en el borde (${hackRes.status} == 400)`);
+
   // --- CARGAR: crear la sala desde el guardado (POST /api/rooms/from-save) ---
   const res = await fetch(`${HTTP_BASE}/api/rooms/from-save`, {
     method: 'POST',
@@ -699,6 +714,99 @@ async function saveLoadScenario(): Promise<void> {
 
   h2.ws.close();
   b2.ws.close();
+  await sleep(200);
+}
+
+// Escenario dedicado: MODO TURBO ⚡ (issue #14). Verifica de punta a punta que el
+// flag turbo viaja por el protocolo (create_room → lobby_state → game_started) y que
+// un guardado de esa partida lo CONSERVA, de modo que la reconstrucción determinista
+// reproduce el estado congelado con el mismo turbo.
+async function turboScenario(): Promise<void> {
+  console.log('\n— Modo Turbo ⚡: el flag viaja por lobby/partida/guardado —');
+  const HOST_TOKEN = 'token-turbo-host';
+  const BOB_TOKEN = 'token-turbo-bob';
+
+  const host = new TestClient('TurboHost', wsUrl({ create: true }));
+  await host.open();
+  host.send({
+    type: 'create_room',
+    name: 'Tere',
+    token: HOST_TOKEN,
+    // se pide TURBO en un clásico (donde aplica)
+    settings: { mapId: 'sendero', mode: 'classic', difficulty: 'normal', turbo: true },
+  });
+  const rj = await host.waitFor('room_joined');
+  const lob = await host.waitFor('lobby_state');
+  assert(lob.settings.turbo === true, 'el lobby_state lleva turbo=true en los ajustes de la sala');
+
+  const bob = new TestClient('TurboBob', wsUrl({ code: rj.code }));
+  await bob.open();
+  bob.send({ type: 'join_room', name: 'Beni', token: BOB_TOKEN, code: rj.code });
+  await bob.waitFor('room_joined');
+  const lobB = await bob.waitFor('lobby_state');
+  assert(lobB.settings.turbo === true, 'el segundo jugador también ve turbo=true en los ajustes');
+  await host.waitFor('lobby_state');
+
+  bob.send({ type: 'set_ready', ready: true });
+  for (;;) {
+    const lb = await host.waitFor('lobby_state');
+    if (lb.players.find((p) => !p.isHost)?.ready === true) break;
+  }
+
+  host.send({ type: 'start_game' });
+  await host.waitFor('countdown');
+  const initH = await host.waitFor('game_started', 6000);
+  const initB = await bob.waitFor('game_started', 6000);
+  assert(initH.init.turbo === true, 'game_started lleva turbo=true en el GameInit (anfitrión)');
+  assert(initB.init.turbo === true, 'game_started lleva turbo=true en el GameInit (segundo jugador)');
+
+  // colocar una torre y llamar la oleada para tener un estado no trivial
+  const map = getMap(initH.init.mapId);
+  const ctx = makePlacementContext(map);
+  let cell: [number, number] | null = null;
+  outer: for (let cy = 0; cy < map.gridH; cy++) {
+    for (let cx = 0; cx < map.gridW; cx++) {
+      if (placementError(map, ctx, [], cx, cy) === null) {
+        cell = [cx, cy];
+        break outer;
+      }
+    }
+  }
+  host.send({ type: 'cmd', cmd: { kind: 'place', towerType: 'archer', cx: cell![0], cy: cell![1] } });
+  await sleep(400);
+  host.send({ type: 'cmd', cmd: { kind: 'call_wave' } });
+  await sleep(2000);
+  assert(host.ticks.length > 20, `la partida turbo arranca y difunde ticks (${host.ticks.length})`);
+
+  // PAUSAR para congelar el tick y pedir el guardado
+  host.send({ type: 'pause' });
+  await host.waitFor('paused');
+  await sleep(400);
+  const frozen = host.ticks[host.ticks.length - 1];
+  assert(!!frozen, 'hay un snapshot congelado tras pausar la partida turbo');
+
+  const salt = 'b1c2d3e4f5a6b7c8';
+  host.send({ type: 'save_request', salt });
+  const info = await host.waitFor('save_info', 6000);
+  const save: SaveData = info.save;
+  assert(save.turbo === true, 'el guardado (SaveData) CONSERVA turbo=true');
+
+  // el log del guardado, reconstruido CON su turbo, reproduce el estado congelado
+  const rdata: ReplayData = {
+    v: save.v, seed: save.seed, mapId: save.mapId, mode: save.mode, difficulty: save.difficulty,
+    players: save.players, log: save.log, finalTick: save.tick, victory: false, wave: save.wave,
+    turbo: save.turbo,
+  };
+  const rebuilt = replayTo(rdata, save.tick);
+  assert(rebuilt.turbo === true, 'la reconstrucción del guardado arranca en modo turbo');
+  assert(rebuilt.wave === frozen.snap.wave, `reconstrucción turbo: oleada idéntica al congelado (${rebuilt.wave} == ${frozen.snap.wave})`);
+  assert(
+    rebuilt.towers.length === frozen.snap.towers.length,
+    `reconstrucción turbo: mismas torres (${rebuilt.towers.length} == ${frozen.snap.towers.length})`,
+  );
+
+  host.ws.close();
+  bob.ws.close();
   await sleep(200);
 }
 
